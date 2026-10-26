@@ -1,0 +1,21 @@
+# Public files are explicitly allowlisted. Everything else stays local.
+/*
+!/.gitignore
+!/README.md
+!/build-plugin.sh
+!/test-runtime.py
+!/verify-iec.mjs
+!/src/
+/src/*
+!/src/gstdtspassthrough.c
+!/tests/
+/tests/*
+!/tests/verify-iec.test.mjs
+!/scripts/
+/scripts/*
+!/scripts/check-publication.py
+!/.github/
+/.github/*
+!/.github/workflows/
+/.github/workflows/*
+!/.github/workflows/checks.yml
