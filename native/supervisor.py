@@ -20,6 +20,7 @@ import struct
 import subprocess
 import threading
 import time
+COMMAND_PATH='/usr/sbin:/usr/bin:/sbin:/bin'
 
 @dataclass(frozen=True)
 class Lease:
@@ -110,7 +111,8 @@ def route_confirmed(state, lease, graph, dsp, epoch=1):
 def command(*arguments, timeout=2):
     # communicate(timeout) alone can wait forever while trying to reap a task
     # blocked in a vendor ioctl. Never wait again after terminating that child.
-    process=subprocess.Popen(arguments,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    process=subprocess.Popen(arguments,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,
+                             env=dict(os.environ,PATH=COMMAND_PATH))
     try:
         stdout,stderr=process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:

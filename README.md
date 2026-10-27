@@ -8,6 +8,21 @@ This is an experimental release. First reboot activation, extended pause/seek/tr
 
 ## Install on the supported TV
 
+The source tree also contains an experimental global installer in
+`native/hdmi/`. It stages the native passthrough controller and a separate HDMI
+controller in one immutable Homebrew boot package. DTS core5.1/48kHz from the
+PS5 on UI HDMI3 (driver port1) has been confirmed with sound after a full TV
+reboot. EDID repairs request a native HDMI renegotiation, with bounded retries;
+opening TV settings suspends controller actions until the selected source returns.
+
+`experiments/hdmi-hd/` is an isolated, unintegrated DTS-HD HDMI proof. Its
+documented DSP settings are codec6 and mode4/HBR; the target reported IEC type17
+and non-PCM eight-channel/192kHz output after a muted trial. Receiver DTS-HD MA
+and audible channel acceptance remain unconfirmed. It is excluded from the
+global boot package and is not a finished HDMI-HD implementation.
+
+The published v0.2.0 archive is the native-only release described below.
+
 Extract the release archive on the TV as root. It contains only this project's plugin, controller, scripts, manifest and license/documentation files. Required GStreamer/FFmpeg runtime libraries come from the compatible restoration patch; they are not redistributed.
 
 ```sh

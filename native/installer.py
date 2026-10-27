@@ -20,6 +20,7 @@ from configuration import native_configuration
 FILES={'plugins/libgstdtspassthrough.so','c5_es_poc.ko','supervisor.py','configuration.py','installer.py'}
 KERNEL='5.4.268-329.ptl4tv.5'
 BOOT_HOOK=Path('/var/lib/webosbrew/init.d/zz-c5-dts-passthrough')
+COMMAND_PATH='/usr/sbin:/usr/bin:/sbin:/bin'
 
 
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -112,7 +113,10 @@ class UncertainCommand(RuntimeError):
 
 
 def command(*args,timeout=5,env=None):
-    process=subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env)
+    # Homebrew boot inherits a reduced PATH; module and mount tools live in
+    # sbin. Keep registry overrides while using only trusted system tool dirs.
+    environment=dict(os.environ if env is None else env,PATH=COMMAND_PATH)
+    process=subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=environment)
     try:stdout,stderr=process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         process.terminate()
@@ -161,6 +165,15 @@ def verify_endpoint(endpoint,pid):
         if peer!=pid or uid!=0:raise RuntimeError('control endpoint belongs to another process')
 
 
+def spawn_supervisor(bundle,manifest,run,output):
+    return subprocess.Popen(['/usr/bin/python3',str(bundle/'supervisor.py'),
+        '--module',str(bundle/'c5_es_poc.ko'),'--module-sha256',manifest['files']['c5_es_poc.ko'],
+        '--module-build',manifest['module_build'],'--plugin',str(bundle/'plugins/libgstdtspassthrough.so'),
+        '--plugin-sha256',manifest['files']['plugins/libgstdtspassthrough.so'],'--control',str(run)],
+        stdout=output,stderr=subprocess.STDOUT,start_new_session=True,
+        env=dict(os.environ,PATH=COMMAND_PATH))
+
+
 def _activate_unlocked(bundle,run,allow_trial=False):
     require_target();manifest=verify_bundle(bundle)
     if not allow_trial:
@@ -194,11 +207,7 @@ def _activate_unlocked(bundle,run,allow_trial=False):
         try:
             with (run/'supervisor.log').open('a') as output:
                 os.chmod(run/'supervisor.log',0o600)
-                process=subprocess.Popen(['/usr/bin/python3',str(bundle/'supervisor.py'),
-                    '--module',str(bundle/'c5_es_poc.ko'),'--module-sha256',manifest['files']['c5_es_poc.ko'],
-                    '--module-build',manifest['module_build'],'--plugin',str(bundle/'plugins/libgstdtspassthrough.so'),
-                    '--plugin-sha256',manifest['files']['plugins/libgstdtspassthrough.so'],'--control',str(run)],
-                    stdout=output,stderr=subprocess.STDOUT,start_new_session=True)
+                process=spawn_supervisor(bundle,manifest,run,output)
             state['supervisor_pid']=process.pid;save(state,state_file)
             deadline=time.monotonic()+3
             while not (run/'control.sock').is_socket():

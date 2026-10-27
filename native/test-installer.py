@@ -1,4 +1,4 @@
-import tempfile,unittest,json,hashlib,os,shutil
+import tempfile,unittest,json,hashlib,os,shutil,subprocess
 from pathlib import Path
 from unittest.mock import patch
 import installer as i
@@ -17,6 +17,21 @@ def bundle(root):
 class Installer(unittest.TestCase):
     def setUp(self):self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name);self.bundle=bundle(self.root/'bundle')
     def tearDown(self):self.temp.cleanup()
+    def test_boot_command_finds_sbin_tool_with_restricted_inherited_path(self):
+        tools=self.root/'sbin';tools.mkdir();tool=tools/'insmod'
+        tool.write_text('#!/bin/sh\nprintf "%s" "$C5_EXEC_TEST"\n');tool.chmod(0o700)
+        with patch.object(i,'COMMAND_PATH',str(tools),create=True),patch.dict(os.environ,{'PATH':'/missing','C5_EXEC_TEST':'inherited'}):
+            self.assertEqual(i.command('insmod'),'inherited')
+            self.assertEqual(i.command('insmod',env={'PATH':'/missing','C5_EXEC_TEST':'isolated','GST_REGISTRY_1_0':'/isolated'}),'isolated')
+    def test_actual_spawned_supervisor_inherits_system_path(self):
+        script=self.bundle/'supervisor.py'
+        script.write_text('import os\nprint(os.environ["PATH"])\n')
+        manifest=json.loads((self.bundle/'manifest.json').read_text())
+        with patch.dict(os.environ,{'PATH':'/missing'}):
+            process=i.spawn_supervisor(self.bundle,manifest,self.root/'run',subprocess.PIPE)
+            output,_=process.communicate(timeout=5)
+        self.assertEqual(process.returncode,0)
+        self.assertEqual(output.decode().strip(),i.COMMAND_PATH)
     def test_offline_dryrun_has_no_mutation_or_device_commands(self):
         before=sorted(p.relative_to(self.root).as_posix() for p in self.root.rglob('*'))
         with patch.object(i,'command',side_effect=AssertionError('device command')):

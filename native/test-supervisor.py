@@ -1,4 +1,4 @@
-import importlib.util,sys,unittest,tempfile,hashlib,subprocess,io
+import importlib.util,sys,unittest,tempfile,hashlib,subprocess,io,os
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch,Mock
@@ -84,6 +84,11 @@ class Driver(unittest.TestCase):
         with patch.object(s.subprocess,'Popen',return_value=child):
             with self.assertRaises(RuntimeError):s.command('amixer')
         self.assertEqual(child.communicate.call_count,1);child.terminate.assert_called_once();child.wait.assert_not_called()
+    def test_boot_command_finds_insmod_with_restricted_path(self):
+        tools=self.root/'sbin';tools.mkdir();tool=tools/'insmod'
+        tool.write_text('#!/bin/sh\nprintf "%s" "$C5_EXEC_TEST"\n');tool.chmod(0o700)
+        with patch.object(s,'COMMAND_PATH',str(tools),create=True),patch.dict(os.environ,{'PATH':'/missing','C5_EXEC_TEST':'loaded'}):
+            self.assertEqual(s.command('insmod',timeout=5),'loaded')
 
 class Protocol(unittest.TestCase):
     def test_request_epochs(self):

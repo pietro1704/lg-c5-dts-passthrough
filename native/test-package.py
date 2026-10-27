@@ -92,6 +92,12 @@ class Package(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 installer.activate(self.output, self.root/'run', True)
         self.assertFalse((self.root/'run').exists())
+    def test_known_good_selection_keeps_exact_accepted_supervisor(self):
+        with patch.object(package,'strip_debug',side_effect=lambda p,tool:None):
+            manifest=package.build(self.source,self.output,'unused',known_good_supervisor=True)
+        self.assertEqual(manifest['files']['supervisor.py'],package.KNOWN_GOOD_SUPERVISOR)
+        self.assertEqual(manifest['supervisor_variant'],'known-good-20261027')
+        installer.verify_bundle(self.output)
 
     def test_stale_binary_audit_rejected(self):
         (self.source/'module/c5_es_poc.ko').write_bytes(b'changed')
