@@ -47,7 +47,11 @@ get_property = obj.g_object_get
 get_property.argtypes = [ptr, C.c_char_p]
 get_property.restype = None
 init(None, None)
-root = pathlib.Path("/tmp/codex-dts-passthrough")
+root = pathlib.Path(os.environ.get("DTS_TEST_ROOT", "/tmp/codex-dts-passthrough"))
+probes = pathlib.Path("/tmp/codex-dts-passthrough")
+probe_names = ("SILENT_PROBE", "RELEASE_PROBE", "probe-es-buffers", "probe-es-be")
+for name in (*probe_names, "probe-codec", "probe-label"):
+    assert not (probes / name).exists(), "existing diagnostic marker: " + name
 stereo = (root / "fixtures/stereo.dts").read_bytes()
 hd = (root / "fixtures/hd.dts").read_bytes()
 
@@ -120,6 +124,7 @@ def run(name, action, expected_source):
         assert packed
         (root / (name + ".spdif")).write_bytes(packed)
         print(name + "=EOS;verify-against=" + expected_source, flush=True)
+        return packed
     finally:
         p.close()
 
@@ -155,6 +160,9 @@ try:
     print("invalid-input=EXPECTED_ERROR;output=0", flush=True)
 finally:
     p.close()
+stereo_le = run("stereo", lambda p: p.feed(stereo), "stereo.dts")
+run("surround", lambda p: p.feed((root / "fixtures/surround.dts").read_bytes()), "surround.dts")
+hd_le = run("hd", lambda p: p.feed(hd), "hd.dts")
 os.environ.pop("DTS_PASSTHROUGH_FILE_TEST")
 p = Pipeline()
 try:
@@ -163,3 +171,43 @@ try:
     print("unvalidated-native-hd=EXPECTED_ERROR;output=0", flush=True)
 finally:
     p.close()
+
+def swap_words(data):
+    assert len(data) % 2 == 0
+    result = bytearray(data)
+    result[0::2], result[1::2] = result[1::2], result[0::2]
+    return bytes(result)
+
+os.environ["DTS_PASSTHROUGH_FILE_TEST"] = "1"
+owned = []
+try:
+    for name in probe_names:
+        (probes / name).open("x").close()
+        owned.append(name)
+    for disabled in ("probe-es-be", "probe-es-buffers", "SILENT_PROBE"):
+        (probes / disabled).unlink()
+        actual = run("hd-without-" + disabled, lambda p: p.feed(hd), "hd.dts (LE16)")
+        assert actual == hd_le, "BE16 must require every ES diagnostic marker"
+        (probes / disabled).open("x").close()
+    for name, action, expected in [
+        ("hd-es-be", lambda p: p.feed(hd), swap_words(hd_le)),
+        ("flush-seek-es-be", seek, swap_words(hd_le)),
+        ("track-identity-es-be", switch_identity, stereo_le),
+        ("cancel-restart-es-be", cancel_restart, stereo_le),
+    ]:
+        actual = run(name, action, "HD BE16 or unchanged DTS core")
+        assert actual == expected, name + ": transport bytes differ"
+        if name == "hd-es-be":
+            assert actual[:4] == bytes.fromhex("f8724e1f"), "wrong ES carrier sync words"
+            # verify-iec.mjs checks this normalized artifact against hd.dts.
+            (root / "hd-es-be-canonical.spdif").write_bytes(swap_words(actual))
+    p = Pipeline()
+    try:
+        p.feed(b"invalid DTS frame")
+        assert not p.finish(expect_error=True), "invalid ES input produced output"
+        print("invalid-es-input=EXPECTED_ERROR;output=0", flush=True)
+    finally:
+        p.close()
+finally:
+    for name in owned:
+        (probes / name).unlink(missing_ok=True)

@@ -311,6 +311,25 @@ static GstFlowReturn push_frame(DtsPass *s, uint8_t *data, gint size) {
   if (s->silent_probe &&
       !g_file_test("/tmp/codex-dts-passthrough/RELEASE_PROBE", G_FILE_TEST_EXISTS))
     gst_buffer_memset(buffer, 0, 0, s->encoded->len);
+  /* C5 ES consumes BE16 carrier words. The LE mux output was checked
+   * against the entire original DTS packet above, including the MA extension.
+   * Change only transport byte order in this explicitly enabled ES probe. */
+  if (hd && s->silent_probe &&
+      g_file_test("/tmp/codex-dts-passthrough/probe-es-buffers", G_FILE_TEST_EXISTS) &&
+      g_file_test("/tmp/codex-dts-passthrough/probe-es-be", G_FILE_TEST_EXISTS)) {
+    GstMapInfo map = GST_MAP_INFO_INIT;
+    gsize i;
+    if ((s->encoded->len & 1) || !gst_buffer_map(buffer, &map, GST_MAP_WRITE)) {
+      gst_buffer_unref(buffer);
+      return GST_FLOW_ERROR;
+    }
+    for (i = 0; i < map.size; i += 2) {
+      guint8 first = map.data[i];
+      map.data[i] = map.data[i + 1];
+      map.data[i + 1] = first;
+    }
+    gst_buffer_unmap(buffer, &map);
+  }
   GST_BUFFER_PTS(buffer) = pts;
   GST_BUFFER_DURATION(buffer) = duration;
   /* This exact LG sink routes bit 21 to LGAO_DATA_ES. Caps "es=true"

@@ -2,16 +2,22 @@
 
 Experimental GStreamer bridge for investigating original DTS bitstream transport on LG C5 / webOS. It parses and packs DTS with FFmpeg; it does not decode or downmix audio. Every packed payload is checked against its source bytes to reject core-only fallback.
 
-**DTS-HD MA output over eARC is unresolved. This is not an installable fix.** Native DTS playback has only partial receiver/channel confirmation. Full surround, Nuvio, Dolby regression and reboot persistence remain unverified. The element registers with rank NONE and blocks native HD output by default.
+**This is an experimental transport, not an installable TV fix.** The element registers with rank NONE and blocks native HD output by default. The C5 ES diagnostic path supports big-endian carrier words; native routing and kernel callback protection must be provided separately. Nuvio, Dolby regression and reboot persistence remain unverified.
 
 ## Contents and local prerequisites
 
 - `src/gstdtspassthrough.c`: experimental bridge, including diagnostic modes.
 - `build-plugin.sh`: cross-build using a locally supplied, prebuilt Zig 0.13.0 at `toolchain/zig`, target-matched headers/libraries in `sysroot/`, and FFmpeg 5.0 headers in `ffmpeg-5.0/`. Those dependencies are not distributed here. The script builds only the plugin; obtain compatible dependencies separately.
 - `verify-iec.mjs`: offline byte-identity verifier for DTS/IEC-61937 artifacts.
-- `test-runtime.py`: ARM/GStreamer lifecycle harness; requires separately supplied DTS fixtures in `/tmp/codex-dts-passthrough/fixtures`, the plugin, and an isolated GStreamer registry on the target. Output goes to appsink. It exercises partial packets, flush/seek, track identity, cancellation/restart, invalid input and the native-HD block.
+- `test-runtime.py`: ARM/GStreamer lifecycle harness; requires separately supplied `stereo.dts`, `surround.dts` and `hd.dts` fixtures in `/tmp/codex-dts-passthrough/fixtures`, the plugin, and an isolated GStreamer registry on the target. Set `DTS_TEST_ROOT` to use another fixture/artifact directory. Output goes to appsink. It exercises partial packets, flush/seek, track identity, cancellation/restart, invalid input, the native-HD block and HD ES byte order.
 
 There is no automatic device deployment or boot installation. Diagnostic marker files under `/tmp/codex-dts-passthrough` can override output routing and the HD block. Do not enable diagnostic modes on a live audio route without reviewing the code. Application-generated silence is not a hardware mute guarantee.
+
+## HD ES carrier words
+
+The tested C5 native ES path consumes big-endian 16-bit carrier words. Feeding the muxer's little-endian output into that path reverses the IEC-61937 sync words at the eARC DMA buffer. The `probe-es-be` diagnostic marker selects a word swap for HD when `SILENT_PROBE` and `probe-es-buffers` are also active. DTS core and ordinary file-test output retain their existing format.
+
+The plugin checks the complete original DTS packet, including its MA extension, before changing transport byte order. The runtime harness checks the BE output against its canonical LE form and writes `hd-es-be-canonical.spdif`; use `verify-iec.mjs` to compare that artifact with the original `hd.dts` bytes. The native-HD block remains active outside explicit diagnostic or file-test modes.
 
 ## Checks
 
