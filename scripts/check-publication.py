@@ -3,12 +3,45 @@ import ast
 import re
 import subprocess
 
-ALLOWED = {
-    '.gitignore', 'README.md', 'build-plugin.sh', 'test-runtime.py',
-    'verify-iec.mjs', 'src/gstdtspassthrough.c',
-    'tests/verify-iec.test.mjs', 'scripts/check-publication.py',
-    '.github/workflows/checks.yml',
-}
+ALLOWED = {'.github/workflows/checks.yml',
+ '.gitignore',
+ 'LICENSES/GPL-2.0-only.txt',
+ 'LICENSES/LGPL-2.1-or-later.txt',
+ 'NOTICE',
+ 'README.md',
+ 'build-plugin.sh',
+ 'native/audit-module.py',
+ 'native/build-module.sh',
+ 'native/checks.py',
+ 'native/configuration.py',
+ 'native/installer.py',
+ 'native/module/Makefile',
+ 'native/module/break_bridge.h',
+ 'native/module/build-id.h',
+ 'native/module/c5_es_poc.c',
+ 'native/module/lease-policy.h',
+ 'native/module/lease-state.h',
+ 'native/module/target.h',
+ 'native/package-candidate.py',
+ 'native/storage-preflight.py',
+ 'native/supervisor.py',
+ 'native/test-clock-target.py',
+ 'native/test-configuration.py',
+ 'native/test-installer.py',
+ 'native/test-lease-policy.c',
+ 'native/test-lease-state.c',
+ 'native/test-package.py',
+ 'native/test-ready-protocol.c',
+ 'native/test-release-policy.c',
+ 'native/test-supervisor.py',
+ 'scripts/check-publication.py',
+ 'src/gstdtspassthrough.c',
+ 'src/native-session.h',
+ 'src/ready-protocol.h',
+ 'src/release-policy.h',
+ 'test-runtime.py',
+ 'tests/verify-iec.test.mjs',
+ 'verify-iec.mjs'}
 tracked = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
 tracked = set(filter(None, tracked))
 assert tracked == ALLOWED, f'Unexpected or missing public paths: {tracked ^ ALLOWED}'
