@@ -1,54 +1,64 @@
-# LG C5 DTS passthrough experiment
+# LG C5 DTS / DTS-HD MA passthrough
 
-Experimental GStreamer bridge for investigating original DTS bitstream transport on LG C5 / webOS. It parses and packs DTS with FFmpeg; it does not decode or downmix audio. Every packed payload is checked against its source bytes to reject core-only fallback.
+Experimental TV-wide integration for the original Nuvio and native GStreamer players. The bridge parses and packs the original DTS bitstream; it never decodes, downmixes or transcodes it. Every payload, including the MA extension, is checked byte for byte.
 
-**This is an experimental transport, not an installable TV fix.** The element registers with rank NONE and blocks native HD output by default. The C5 ES diagnostic path supports big-endian carrier words; native routing and kernel callback protection must be provided separately. Nuvio, Dolby regression and reboot persistence remain unverified.
+**Confirmed on 27 October 2026:** Nuvio 1.2.9 playing a selected DTS-HD MA track; the user confirmed DTS-HD MA on the receiver and correct sound. An earlier native-player clip verified all six channels. Supported target: LG C5, firmware33.31.68, kernel `5.4.268-329.ptl4tv.5`, rooted webOS, existing compatible `dts_restore-2.0` integration and eARC receiver. Other models/firmware are refused or unverified.
 
-## Contents and local prerequisites
+This is an experimental release. First reboot activation, extended pause/seek/track stability, measured A/V sync and Dolby regression remain pending. A DTS lossy label while the receiver shows MA after an HD session is under investigation. Receiver labels alone do not prove the encoded profile.
 
-- `src/gstdtspassthrough.c`: experimental bridge, including diagnostic modes.
-- `build-plugin.sh`: cross-build using a locally supplied, prebuilt Zig 0.13.0 at `toolchain/zig`, target-matched headers/libraries in `sysroot/`, and FFmpeg 5.0 headers in `ffmpeg-5.0/`. Those dependencies are not distributed here. The script builds only the plugin; obtain compatible dependencies separately.
-- `verify-iec.mjs`: offline byte-identity verifier for DTS/IEC-61937 artifacts.
-- `test-runtime.py`: ARM/GStreamer lifecycle harness; requires separately supplied `stereo.dts`, `surround.dts` and `hd.dts` fixtures in `/tmp/codex-dts-passthrough/fixtures`, the plugin, and an isolated GStreamer registry on the target. Set `DTS_TEST_ROOT` to use another fixture/artifact directory. Output goes to appsink. It exercises partial packets, flush/seek, track identity, cancellation/restart, invalid input, the native-HD block and HD ES byte order.
+## Install on the supported TV
 
-There is no automatic device deployment or boot installation. Diagnostic marker files under `/tmp/codex-dts-passthrough` can override output routing and the HD block. Do not enable diagnostic modes on a live audio route without reviewing the code. Application-generated silence is not a hardware mute guarantee.
-
-## HD ES carrier words
-
-The tested C5 native ES path consumes big-endian 16-bit carrier words. Feeding the muxer's little-endian output into that path reverses the IEC-61937 sync words at the eARC DMA buffer. The `probe-es-be` diagnostic marker selects a word swap for HD when `SILENT_PROBE` and `probe-es-buffers` are also active. DTS core and ordinary file-test output retain their existing format.
-
-The plugin checks the complete original DTS packet, including its MA extension, before changing transport byte order. The runtime harness checks the BE output against its canonical LE form and writes `hd-es-be-canonical.spdif`; use `verify-iec.mjs` to compare that artifact with the original `hd.dts` bytes. The native-HD block remains active outside explicit diagnostic or file-test modes.
-
-## Checks
-
-Run with Python 3 and Node.js 22 or newer:
+Extract the release archive on the TV as root. It contains only this project's plugin, controller, scripts, manifest and license/documentation files. Required GStreamer/FFmpeg runtime libraries come from the compatible restoration patch; they are not redistributed.
 
 ```sh
-python3 scripts/check-publication.py
-bash -n build-plugin.sh
-node --check verify-iec.mjs
+python3 installer.py dry-run
+python3 installer.py install-boot
+```
+
+`install-boot` verifies hashes/architectures, stages an immutable version under `/home/root/c5-dts-passthrough` and creates `zz-c5-dts-passthrough` in the Homebrew init directory. The hook waits for the original restoration overrides. Installation preserves current playback and does not restart the TV. **First reboot still needs validation.**
+
+To disable future activation while preserving the current session:
+
+```sh
+python3 /home/root/c5-dts-passthrough/current/installer.py disable-boot
+```
+
+For an explicitly requested temporary trial, use `activate --allow-hardware-trial`. `deactivate` restores only bindings owned by that activation and refuses active leases. A controller used for audio stays resident until reboot; never force an unload or restart broad audio services.
+
+## How it works
+
+The plugin checks complete DTS packets, packs IEC61937 and marks native HD buffers as ES. This C5 consumes BE16 carrier words; transport words are swapped after validating the payload. MA5.1 uses an eight-channel/S16/192kHz transport carrier, preserving six encoded source channels.
+
+The exact-build controller associates renderer0/1 with authenticated process leases, generation and epoch. It connects the owned compressed path to eARC and protects codec7 callback handling. SHA256 fingerprints guard firmware-specific locations. No firmware instructions are distributed.
+
+Startup retains originals while preparing the renderer with untimed silence. Two seconds of pipeline latency keep other sinks on the same clock without shifting original audio PTS. Route confirmation has a1.5-second deadline; failure sends no original audio to an unconfirmed route. Pause suspends the lease; resume requires fresh proof.
+
+The supervisor rejects ambiguous owners, stale epochs, changed plugin inodes and unexpected formats. Vendor-command failure stops routing writes. Refresh revalidates ownership before writing; the vendor ALSA interface offers no atomic compare-and-set across unrelated applications.
+
+## Build and test
+
+Obtain verified, target-matched prerequisites separately. No firmware, kernel image, libraries, sysroot, toolchain or media is included. Build only this project's targets:
+
+```sh
+# Prebuilt Zig in toolchain/zig, headers/libs in sysroot/, FFmpeg5 headers.
+DTS_NATIVE_SESSION=1 bash build-plugin.sh
+
+# Separately supplied, already prepared C5 kernel trees and toolchain.
+C5_KERNEL_SOURCE=/path/to/kernel C5_KERNEL_OBJECTS=/path/to/prepared-output bash native/build-module.sh
+
+python3 native/checks.py
 node --test tests/verify-iec.test.mjs
+python3 scripts/check-publication.py
 ```
 
-These checks validate publication boundaries, script syntax and the offline verifier with synthetic data. They do not compile or execute the ARM plugin, reproduce the target lifecycle tests, or establish HDMI/receiver compatibility.
+Without `DTS_NATIVE_SESSION=1`, the plugin keeps diagnostic rank NONE and blocks unverified native HD. `native/module/build-id.h` identifies this released controller; changed sources require a new identity and target validation. Build scripts do not supply vendor kernel prerequisites or promise bit-identical output across toolchains.
 
-With privately obtained matching source and packed artifacts:
+`native/audit-module.py` audits ABI/vermagic/imports against separately supplied local artifacts. `native/package-candidate.py` packages owned files and strips debug. Without exact target clock evidence it blocks activation. `native/test-clock-target.py` explicitly runs only on the ARM32 target with memory sinks, without opening an audio device. Host CI never runs device tests.
 
-```sh
-node verify-iec.mjs /path/to/source.dts /path/to/output.spdif
-```
+The target regression reproduced original-buffer drops before the fix. Afterward, all1,867,776 carrier bytes and original PTS survived; a second sink on the same clock agreed within0.05ms. Fragmentation passed; READY beyond the deadline released zero original bytes. These checks supplement the receiver confirmation and do not replace hardware lifecycle acceptance.
 
-## Publication policy
+## Publication and licenses
 
-The `.gitignore` denies files by default and permits only individually reviewed public files. CI separately checks the tracked-file list and common credential/private-address patterns. Git ignore rules do not protect files added with `git add -f`; review every staged diff before publishing.
+The deny-by-default ignore file and publication check permit only reviewed text sources. Credentials, addresses, device evidence, media and investigation notes remain private. Release binaries contain only this project's code. See `NOTICE`, `LICENSES/` and source SPDX identifiers.
 
-Firmware, proprietary binaries and libraries, sysroots, toolchains, media/fixtures, device dumps, logs, network addresses, access helpers, credentials and private investigation notes must remain outside Git. This repository intentionally excludes the local investigation package and its handoff.
-
-The C source carries `LGPL-2.1-or-later`. Third-party runtime dependencies and media are not included; their respective licenses still apply.
-
-## Related projects
-
-- <https://github.com/lgstreamer/dts_restore>
-- <https://github.com/dakenf/lg-g5-dts>
-
-Firmware-specific findings from other models must not be applied to a C5 without validation.
+Related projects: [dts_restore](https://github.com/lgstreamer/dts_restore) and [lg-g5-dts](https://github.com/dakenf/lg-g5-dts). Addresses from other models must never be applied to the C5.

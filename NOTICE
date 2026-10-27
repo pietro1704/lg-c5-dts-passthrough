@@ -1,0 +1,13 @@
+The GStreamer transport bridge is LGPL-2.1-or-later.
+The C5 kernel controller and native integration are GPL-2.0-only.
+See file SPDX identifiers and LICENSES/ for the full license texts.
+
+native/module/break_bridge.h adapts dakenf/lg-g5-dts,
+tools/dts-hd-route/break_bridge.h, commit
+ac5f3e3e1d7f034ad1f35c43ae7c722aeae798ae.
+https://github.com/dakenf/lg-g5-dts
+C5 addresses and fingerprints were derived separately for the supported C5.
+
+The runtime uses separately installed GStreamer and FFmpeg libraries.
+This distribution contains no LG firmware, kernel image, proprietary library,
+toolchain, third-party media, credentials or device logs.
