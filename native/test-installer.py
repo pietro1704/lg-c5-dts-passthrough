@@ -17,6 +17,54 @@ def bundle(root):
 class Installer(unittest.TestCase):
     def setUp(self):self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name);self.bundle=bundle(self.root/'bundle')
     def tearDown(self):self.temp.cleanup()
+    def test_cold_registry_seed_is_persistent_and_reversible(self):
+        registry=self.root/'cold.bin';registry.write_bytes(b'vendor registry')
+        state=self.root/'seed'
+        def inspect(*args,**kwargs):
+            Path(kwargs['env']['GST_REGISTRY_1_0']).write_bytes(b'seeded registry')
+            return 'Filename '+str(self.bundle/'plugins/libgstdtspassthrough.so')+'\nRank primary + 54 (310)'
+        with patch.object(i,'command',side_effect=inspect):
+            i.seed_cold_registry(self.bundle,registry,state)
+            self.assertEqual(registry.read_bytes(),b'seeded registry')
+            i.seed_cold_registry(self.bundle,registry,state) # no duplicate backup
+        i.restore_cold_registry(registry,state)
+        self.assertEqual(registry.read_bytes(),b'vendor registry')
+    def test_failed_seed_inspection_preserves_original(self):
+        registry=self.root/'cold.bin';registry.write_bytes(b'original')
+        with patch.object(i,'command',return_value='wrong plugin'):
+            with self.assertRaises(RuntimeError):i.seed_cold_registry(self.bundle,registry,self.root/'seed')
+        self.assertEqual(registry.read_bytes(),b'original')
+    def test_seed_refuses_foreign_registry_or_plugin_on_repeat_and_restore(self):
+        registry=self.root/'cold.bin';registry.write_bytes(b'original');state=self.root/'seed'
+        def inspect(*args,**kwargs):
+            Path(kwargs['env']['GST_REGISTRY_1_0']).write_bytes(b'seeded')
+            return str(self.bundle/'plugins/libgstdtspassthrough.so')+'\nRank (310)'
+        with patch.object(i,'command',side_effect=inspect):i.seed_cold_registry(self.bundle,registry,state)
+        registry.write_bytes(b'foreign')
+        with self.assertRaises(RuntimeError):i.seed_cold_registry(self.bundle,registry,state)
+        with self.assertRaises(RuntimeError):i.restore_cold_registry(registry,state)
+        self.assertEqual(registry.read_bytes(),b'foreign')
+    def test_cancelled_probe_preserves_disk_and_cleans_unjournaled_files(self):
+        registry=self.root/'cold.bin';registry.write_bytes(b'original');state=self.root/'seed'
+        with patch.object(i,'command',side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):i.seed_cold_registry(self.bundle,registry,state)
+        self.assertEqual(registry.read_bytes(),b'original')
+        self.assertEqual(list(state.iterdir()),[])
+    def test_interrupted_replace_retries_from_journal_and_rejects_changed_plugin(self):
+        registry=self.root/'cold.bin';registry.write_bytes(b'original');state=self.root/'seed'
+        def inspect(*args,**kwargs):
+            Path(kwargs['env']['GST_REGISTRY_1_0']).write_bytes(b'seeded')
+            return str(self.bundle/'plugins/libgstdtspassthrough.so')+'\nRank (310)'
+        with patch.object(i,'command',side_effect=inspect),patch.object(i,'replace_registry',side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):i.seed_cold_registry(self.bundle,registry,state)
+        self.assertEqual(registry.read_bytes(),b'original')
+        with patch.object(i,'command',side_effect=AssertionError('must use journal')):
+            i.seed_cold_registry(self.bundle,registry,state)
+        self.assertEqual(registry.read_bytes(),b'seeded')
+        (self.bundle/'plugins/libgstdtspassthrough.so').write_bytes(b'changed')
+        with self.assertRaises((RuntimeError,ValueError)):i.seed_cold_registry(self.bundle,registry,state)
+        i.restore_cold_registry(registry,state)
+        self.assertEqual(registry.read_bytes(),b'original')
     def test_boot_command_finds_sbin_tool_with_restricted_inherited_path(self):
         tools=self.root/'sbin';tools.mkdir();tool=tools/'insmod'
         tool.write_text('#!/bin/sh\nprintf "%s" "$C5_EXEC_TEST"\n');tool.chmod(0o700)

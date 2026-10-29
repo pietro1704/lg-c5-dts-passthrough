@@ -36,6 +36,18 @@ class Tests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name);self.bundle=bundle(self.root/'bundle');self.prefix=self.root/'installed';self.hook=self.root/'hook'
+    def test_cold_registry_view_is_unmounted_on_success_failure_and_cancellation(self):
+        for failure in (None,RuntimeError('probe failure'),KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__):
+                native=Mock();native.seed_cold_registry.return_value={'seeded_sha256':'a'*64}
+                if failure is not None:native.seed_cold_registry.side_effect=failure
+                spec=Mock()
+                with patch.object(m,'require_target'),patch.object(m.importlib.util,'spec_from_file_location',return_value=spec),patch.object(m.importlib.util,'module_from_spec',return_value=native):
+                    if failure is None:self.assertEqual(m.cold_registry(self.bundle,self.prefix)['cold_registry'],'prepared')
+                    else:
+                        with self.assertRaises(type(failure)):m.cold_registry(self.bundle,self.prefix)
+                commands=[call.args[0] for call in native.command.call_args_list]
+                self.assertEqual(commands,['mount','umount'])
     def test_install_and_repeat_preserve_current_session(self):
         first=m.install(self.bundle,self.prefix,self.hook);second=m.install(self.bundle,self.prefix,self.hook)
         self.assertEqual(first['current_audio'],'unchanged');self.assertEqual(second['boot'],'already installed')

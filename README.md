@@ -25,6 +25,14 @@ hardware acceptance. Game DTS startup delay remains under investigation.
 
 The published v0.2.0 archive is the native-only release described below.
 
+The global installer also seeds the persistent GStreamer registry for the next
+cold boot, retaining a verified backup. Media workers preloaded before the
+Homebrew hook otherwise cache a catalog without the DTS bridge and can omit
+the DTS track after reopening Nuvio. Seeding preserves current playback;
+`disable-boot` restores the backup only if the seeded disk registry still matches.
+An interrupted preparation can be retried with `prepare-cold-boot`. A complete
+reboot and Nuvio reopen/AC3/DTS acceptance are still required for this correction.
+
 Extract the release archive on the TV as root. It contains only this project's plugin, controller, scripts, manifest and license/documentation files. Required GStreamer/FFmpeg runtime libraries come from the compatible restoration patch; they are not redistributed.
 
 ```sh

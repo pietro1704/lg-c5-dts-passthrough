@@ -80,6 +80,9 @@ Install the next-boot hook on the supported TV as root:
     python3 global_install.py install-boot
 
 Installation stages immutable owned files and preserves current playback.
+It seeds the persistent GStreamer registry before the next cold boot so pooled
+media workers discover DTS before the Homebrew hook runs. A guarded backup is
+restored by disable-boot; current runtime registry bindings are preserved.
 The first full reboot must be validated before declaring persistence working.
 The hook starts the shared native bridge, native plugin integration and HDMI
 controllers, including the separately scoped HDMI-HD controller. Model

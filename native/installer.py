@@ -35,6 +35,97 @@ def identity(path):
     info=Path(path).stat();return [info.st_dev,info.st_ino]
 
 
+def replace_registry(path,data,expected):
+    """Replace a regular, owned registry only while its identity still matches."""
+    info=path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or sha(path)!=expected:
+        raise RuntimeError('foreign cold registry; no overwrite')
+    fd,name=tempfile.mkstemp(prefix='.c5-registry-',dir=path.parent)
+    try:
+        with os.fdopen(fd,'wb') as output:
+            os.fchmod(output.fileno(),stat.S_IMODE(info.st_mode))
+            os.fchown(output.fileno(),info.st_uid,info.st_gid)
+            output.write(data);output.flush();os.fsync(output.fileno())
+        current=path.lstat()
+        if ((current.st_dev,current.st_ino,current.st_mtime_ns,current.st_ctime_ns)!=
+                (info.st_dev,info.st_ino,info.st_mtime_ns,info.st_ctime_ns) or sha(path)!=expected):
+            raise RuntimeError('cold registry changed during preparation')
+        os.replace(name,path)
+        directory=os.open(path.parent,os.O_RDONLY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
+    finally:
+        if os.path.exists(name):os.unlink(name)
+
+
+def seed_cold_registry(bundle,registry,state_dir):
+    """Seed the disk registry before next boot's preloaded media workers start.
+
+    Caller supplies an unoverlaid view; current runtime bindings are untouched.
+    A prepared journal allows retry after interruption on either side of replace.
+    """
+    verify_bundle(bundle)
+    if state_dir.is_symlink():raise RuntimeError('symlink cold registry state')
+    state_dir.mkdir(mode=0o700,exist_ok=True)
+    info=state_dir.stat()
+    if info.st_uid!=os.geteuid() or info.st_mode&0o077:raise RuntimeError('unsafe cold registry state')
+    state_path=state_dir/'state.json';backup=state_dir/'original.bin';candidate=state_dir/'seeded.bin'
+    if any(p.is_symlink() for p in (registry,state_path,backup,candidate)):
+        raise RuntimeError('symlink cold registry component')
+    plugin=bundle/'plugins/libgstdtspassthrough.so'
+    if state_path.exists():
+        state=json.loads(state_path.read_text())
+        if state['plugin']!=str(plugin) or state['plugin_sha256']!=sha(plugin):
+            raise RuntimeError('different cold registry installation')
+        if sha(backup)!=state['original_sha256'] or sha(candidate)!=state['seeded_sha256']:
+            raise RuntimeError('cold registry backup or candidate changed')
+        if sha(registry)==state['seeded_sha256']:return state
+        replace_registry(registry,candidate.read_bytes(),state['original_sha256'])
+        return state
+    if backup.exists() or candidate.exists():raise RuntimeError('unjournaled cold registry files; inspect before retry')
+    original=registry.lstat()
+    if not stat.S_ISREG(original.st_mode) or original.st_uid!=os.geteuid():
+        raise RuntimeError('foreign cold registry')
+    before=sha(registry)
+    try:
+        shutil.copy2(registry,backup);shutil.copy2(registry,candidate)
+        inspected=command('gst-inspect-1.0','dtspassthrough',timeout=5,env=registry_environment(bundle,candidate))
+        if str(plugin) not in inspected or not re.search(r'Rank\s+.*\(310\)',inspected):
+            raise RuntimeError('cold registry plugin identity or rank unavailable')
+        current=registry.lstat()
+        if ((current.st_dev,current.st_ino,current.st_mtime_ns,current.st_ctime_ns)!=
+                (original.st_dev,original.st_ino,original.st_mtime_ns,original.st_ctime_ns) or sha(registry)!=before):
+            raise RuntimeError('cold registry changed during inspection')
+        state={'plugin':str(plugin),'plugin_sha256':sha(plugin),
+            'original_sha256':before,'seeded_sha256':sha(candidate)}
+        for path in (backup,candidate):
+            with path.open('rb') as stream:os.fsync(stream.fileno())
+        save(state,state_path)
+        directory=os.open(state_dir,os.O_RDONLY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
+        replace_registry(registry,candidate.read_bytes(),before)
+        return state
+    except BaseException:
+        # Once journaled, retain all evidence for deterministic retry/rollback.
+        if not state_path.exists():
+            for path in (backup,candidate):
+                if path.exists():path.unlink()
+        raise
+
+
+def restore_cold_registry(registry,state_dir):
+    state_path=state_dir/'state.json';backup=state_dir/'original.bin'
+    if any(p.is_symlink() for p in (state_dir,state_path,backup,registry)):
+        raise RuntimeError('symlink cold registry rollback component')
+    state=json.loads(state_path.read_text())
+    if sha(backup)!=state['original_sha256']:raise RuntimeError('cold registry backup changed')
+    if sha(registry)!=state['original_sha256']:
+        replace_registry(registry,backup.read_bytes(),state['seeded_sha256'])
+    for name in ('state.json','original.bin','seeded.bin'):(state_dir/name).unlink()
+    state_dir.rmdir()
+
+
 def verify_bundle(bundle):
     if bundle.is_symlink():raise ValueError('symlink package root')
     manifest=json.loads((bundle/'manifest.json').read_text())

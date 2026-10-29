@@ -112,3 +112,4 @@
 !/native/known-good-supervisor.py
 !/native/test-ready-receive.py
 !/native/test-latency-target.inc
+!/native/test-cold-registry-target.py
