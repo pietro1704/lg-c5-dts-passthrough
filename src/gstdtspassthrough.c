@@ -769,7 +769,11 @@ static GstStateChangeReturn change_state(GstElement *element, GstStateChange tra
     suspend_session(s,TRUE);
   }
   if(result!=GST_STATE_CHANGE_FAILURE && transition==GST_STATE_CHANGE_PAUSED_TO_READY) {
-    set_native_latency(s,FALSE);
+    /* decodebin removes us while holding its state/stream locks. A synchronous
+     * LATENCY bus handler can reenter the pipeline before teardown completes.
+     * This element no longer contributes latency; clear it without notifying
+     * from teardown. A new configured stream advertises its latency normally. */
+    g_atomic_int_set(&s->native_latency,FALSE);
     reset_stream(s);end_native_session(s);
     gst_event_replace(&s->segment,NULL);
   }

@@ -111,3 +111,4 @@
 !/experiments/hdmi-hd/test-policy.c
 !/native/known-good-supervisor.py
 !/native/test-ready-receive.py
+!/native/test-latency-target.inc
