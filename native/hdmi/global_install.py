@@ -9,11 +9,14 @@ RUN=Path('/run/c5-dts-global')
 NATIVE_RUN=Path('/run/c5-dts')
 KERNEL='5.4.268-329.ptl4tv.5'
 NATIVE_BUILD='7059bc5a81bebb973b591a4190cba308fa8c26a5a401a512d8e98213b80748c6'
+HD_FILES={'hdmi_hd_supervisor.py','hd_controller.py','alsa_controls.py','luna_rpc.py',
+    'runtime_settings.py','edid.py','broker-gate.ko','auto-route.ko'}
 PAYLOAD={'global_install.py','README.md','NOTICE','LICENSES/GPL-2.0-only.txt','LICENSES/LGPL-2.1-or-later.txt',
     'native/installer.py','native/configuration.py','native/supervisor.py','native/manifest.json',
     'native/c5_es_poc.ko','native/plugins/libgstdtspassthrough.so',
     'hdmi/hdmi_supervisor.py','hdmi/alsa_controls.py','hdmi/luna_rpc.py','hdmi/runtime_settings.py',
     'hdmi/edid.py','hdmi/hpd.py','hdmi/broker-gate.ko','hdmi/auto-route.ko','hdmi/hdmi-manifest.json'}
+PAYLOAD.update('hdmi_hd/'+name for name in HD_FILES|{'hdmi-manifest.json'})
 
 
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -37,7 +40,8 @@ def verify(bundle):
             if cursor.is_symlink():raise RuntimeError('symlink package component')
         if not cursor.is_file() or sha(cursor)!=digest:raise RuntimeError('package artifact changed: '+name)
     for name,kind,machine in [('native/c5_es_poc.ko',2,183),('hdmi/broker-gate.ko',2,183),
-        ('hdmi/auto-route.ko',2,183),('native/plugins/libgstdtspassthrough.so',1,40)]:
+        ('hdmi/auto-route.ko',2,183),('hdmi_hd/broker-gate.ko',2,183),
+        ('hdmi_hd/auto-route.ko',2,183),('native/plugins/libgstdtspassthrough.so',1,40)]:
         data=(bundle/name).read_bytes()
         if data[:4]!=b'\x7fELF' or data[4]!=kind or int.from_bytes(data[18:20],'little')!=machine:
             raise RuntimeError('wrong target architecture')
@@ -56,6 +60,11 @@ def verify(bundle):
         raise RuntimeError('bad HDMI manifest')
     for name,digest in hdmi['files'].items():
         if 'hdmi/'+name not in PAYLOAD or sha(bundle/'hdmi'/name)!=digest:raise RuntimeError('HDMI manifest mismatch')
+    hd=json.loads((bundle/'hdmi_hd/hdmi-manifest.json').read_text())
+    if hd.get('schema')!=1 or hd.get('kernel')!=KERNEL or set(hd.get('files',{}))!=HD_FILES:
+        raise RuntimeError('bad HDMI-HD manifest')
+    for name,digest in hd['files'].items():
+        if sha(bundle/'hdmi_hd'/name)!=digest:raise RuntimeError('HDMI-HD manifest mismatch')
     return manifest
 
 
@@ -137,6 +146,27 @@ def disable(prefix=PREFIX,hook=HOOK):
     return {'boot':'disabled','current_audio':'unchanged; resident modules retained until reboot'}
 
 
+def start_controller(bundle,run,script):
+    secure_directory(run)
+    ready=run/'hdmi-ready.json';log=run/'controller.log'
+    if ready.exists() or ready.is_symlink() or log.is_symlink():
+        raise RuntimeError('existing or foreign controller endpoint; do not stack')
+    with log.open('a') as output:
+        os.fchmod(output.fileno(),0o600)
+        process=subprocess.Popen(['/usr/bin/python3',str(bundle/script),'--activate',
+            '--bundle',str(bundle),'--run',str(run)],stdout=output,stderr=subprocess.STDOUT,
+            start_new_session=True,env=dict(os.environ,PATH='/usr/sbin:/usr/bin:/sbin:/bin'))
+    deadline=time.monotonic()+12
+    while not ready.exists():
+        if process.poll() is not None or time.monotonic()>deadline:
+            raise RuntimeError('controller did not initialize; inspect log; no replacement attempted')
+        time.sleep(.05)
+    if (ready.is_symlink() or ready.stat().st_uid!=os.geteuid() or ready.stat().st_mode&0o077 or
+        json.loads(ready.read_text()).get('pid')!=process.pid or process.poll() is not None):
+        raise RuntimeError('foreign or dead readiness endpoint')
+    return process.pid
+
+
 def boot():
     require_target();bundle,state=current_bundle();secure_directory(RUN)
     with (RUN/'boot.lock').open('a') as lock:
@@ -168,19 +198,13 @@ def boot():
         params=Path('/sys/module/c5_es_poc/parameters')
         if (params/'session_build').read_text().strip()!=NATIVE_BUILD or (params/'lease_api_only').read_text().strip() not in ('N','0'):
             raise RuntimeError('different native driver; no activation')
-        hdmi_run=RUN/'hdmi';secure_directory(hdmi_run)
-        with (hdmi_run/'controller.log').open('a') as output:
-            os.chmod(hdmi_run/'controller.log',0o600)
-            process=subprocess.Popen(['/usr/bin/python3',str(bundle/'hdmi/hdmi_supervisor.py'),'--activate',
-                '--bundle',str(bundle/'hdmi'),'--run',str(hdmi_run)],stdout=output,stderr=subprocess.STDOUT,start_new_session=True,
-                env=dict(os.environ,PATH='/usr/sbin:/usr/bin:/sbin:/bin'))
-        deadline=time.monotonic()+12
-        while not (hdmi_run/'hdmi-ready.json').exists():
-            if process.poll() is not None or time.monotonic()>deadline:raise RuntimeError('HDMI controller did not initialize; inspect log')
-            time.sleep(.05)
-        if json.loads((hdmi_run/'hdmi-ready.json').read_text())['pid']!=process.pid:raise RuntimeError('foreign readiness endpoint')
+        hdmi_pid=start_controller(bundle/'hdmi',RUN/'hdmi','hdmi_supervisor.py')
+        hd_pid=None;hd_error=None
+        try:hd_pid=start_controller(bundle/'hdmi_hd',RUN/'hdmi-hd','hdmi_hd_supervisor.py')
+        except (OSError,RuntimeError) as error:hd_error=str(error)
         native_result=native.activate(bundle/'native',NATIVE_RUN,True)
-        result={'version':state['version'],'hdmi_pid':process.pid,'native':native_result,'reboot_audio_verified':False}
+        result={'version':state['version'],'hdmi_pid':hdmi_pid,'hdmi_hd_pid':hd_pid,
+            'hdmi_hd_error':hd_error,'native':native_result,'reboot_audio_verified':False}
         atomic_file(RUN/'started.json',(json.dumps(result,indent=2)+'\n').encode())
         print(json.dumps(result),flush=True)
 

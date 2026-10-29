@@ -48,6 +48,8 @@ ALLOWED.update({
     'native/hdmi/edid.py',
     'native/hdmi/global_install.py',
     'native/hdmi/hdmi_supervisor.py',
+    'native/hdmi/hdmi_hd_supervisor.py',
+    'native/hdmi/test-hd-supervisor.py',
     'native/hdmi/hpd.py',
     'native/hdmi/luna_rpc.py',
     'native/hdmi/module/Makefile',

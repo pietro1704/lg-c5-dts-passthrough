@@ -39,7 +39,17 @@ class Tests(unittest.TestCase):
         for transport in [(1,2,48000),(0,8,192000),(1,8,48000)]:
             self.assertFalse(replace(state(),transport=transport).ready)
     def test_changed_source_and_decoder_stop_cannot_release_audio(self):
-        for change in [dict(foreground=False),dict(native_idle=False),dict(physical_dts=False),dict(adec_started=False),dict(gain_unmuted=False),dict(route_connected=False),dict(input_pointer=200)]:
+        for change in [dict(foreground=False),dict(native_idle=False),dict(physical_dts=False),dict(adec_started=False),dict(gain_unmuted=False),dict(route_connected=False),dict(input_pointer=200),dict(sink_supported=False)]:
             self.assertFalse(replace(state(),**change).ready)
+
+    def test_receiver_loss_and_native_playback_disarm_hd_recovery(self):
+        for change in [dict(sink_supported=False),dict(native_idle=False),dict(physical_dts=False)]:
+            with self.subTest(change=change):
+                current=replace(state(),**change)
+                backend=SimpleNamespace(snapshot=lambda:current,gate=Mock(),route=Mock(),release=Mock(),recover=Mock())
+                controller=h.Controller(backend)
+                self.assertEqual(controller.tick(),'waiting')
+                backend.recover.assert_not_called();backend.route.assert_called_once_with(0)
+
 
 if __name__=='__main__':unittest.main()

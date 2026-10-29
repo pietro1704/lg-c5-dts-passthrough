@@ -116,11 +116,13 @@ class Controller:
 
 
 class Target:
-    def __init__(self,bundle,manifest,run):
+    def __init__(self,bundle,manifest,run,sink_check=None):
         assert os.geteuid()==0 and os.uname().release==KERNEL
         self.bundle=Path(bundle);self.manifest=manifest;self.run=Path(run);self.alsa=AlsaControls()
         self.mem=os.open('/dev/mem',os.O_RDONLY);self.foreground_until=0;self.gain=None;self.owned=None
-        self.settings_until=float('inf');self.sink_supported=True
+        self.sink_check=sink_check
+        self.settings_until=0 if sink_check is not None else float('inf')
+        self.sink_supported=sink_check is None
         candidates=[]
         for path in Path('/proc').iterdir():
             if not path.name.isdigit():continue
@@ -163,8 +165,7 @@ class Target:
         physical=Path('/proc/lgtv-driver/audio/hdmi').read_text()
         adec=Path('/proc/lgtv-driver/audio/adec.p1').read_text()
         if self.is_foreground and idle and main==(1,1) and now>=self.settings_until:
-            self.sink_supported=receiver_sad() is not None
-            if self.sink_supported:apply_edid(self.run,notify_source=True)
+            self.sink_supported=bool(self.sink_check())
             self.settings_until=now+5
         pointer=struct.unpack('<Q',os.pread(self.mem,8,0x262a228))[0];kind=index=-1
         if 0xffffff8000000000<=pointer<0xffffffc000000000:

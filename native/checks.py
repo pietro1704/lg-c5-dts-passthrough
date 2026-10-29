@@ -7,7 +7,7 @@ import tempfile
 root=Path(__file__).resolve().parent
 for name in ('supervisor','installer','configuration','package'):
     subprocess.run([sys.executable,str(root/('test-'+name+'.py'))],check=True)
-for name in ('alsa-controls','luna-rpc','supervisor','global-install','runtime-settings','hpd'):
+for name in ('alsa-controls','luna-rpc','supervisor','hd-supervisor','global-install','runtime-settings','hpd'):
     subprocess.run([sys.executable,str(root/'hdmi'/('test-'+name+'.py'))],check=True)
 experiment=root.parent/'experiments/hdmi-hd'
 subprocess.run([sys.executable,str(experiment/'test-hd-controller.py')],check=True)

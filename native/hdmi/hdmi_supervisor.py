@@ -282,7 +282,11 @@ def main():
     ready=args.run/'hdmi-ready.json'
     if ready.exists() or ready.is_symlink():raise RuntimeError('existing HDMI activation; no replacement')
     target=Target(args.bundle,manifest,args.run);controller=Controller(target)
-    ready.write_text(json.dumps({'pid':os.getpid(),'schema':1}));ready.chmod(0o600)
+    temporary=ready.with_suffix('.next')
+    fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+    with os.fdopen(fd,'w') as stream:
+        json.dump({'pid':os.getpid(),'schema':1},stream);stream.flush();os.fsync(stream.fileno())
+    os.link(temporary,ready);temporary.unlink()
     previous=None
     try:
         while True:

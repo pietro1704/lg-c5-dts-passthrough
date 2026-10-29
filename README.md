@@ -15,11 +15,13 @@ PS5 on UI HDMI3 (driver port1) has been confirmed with sound after a full TV
 reboot. EDID repairs request a native HDMI renegotiation, with bounded retries;
 opening TV settings suspends controller actions until the selected source returns.
 
-`experiments/hdmi-hd/` is an isolated, unintegrated DTS-HD HDMI proof. Its
-documented DSP settings are codec6 and mode4/HBR; the target reported IEC type17
-and non-PCM eight-channel/192kHz output after a muted trial. Receiver DTS-HD MA
-and audible channel acceptance remain unconfirmed. It is excluded from the
-global boot package and is not a finished HDMI-HD implementation.
+`experiments/hdmi-hd/` contains the separately scoped DTS-HD HDMI controller.
+DSP codec6 and mode4/HBR recovered non-PCM eight-channel/192kHz transport on a
+Blu-ray trial; the user confirmed DTS-HD MA with sound. The global candidate
+now packages this controller for boot, checks the receiver's MA capabilities,
+and preserves the accepted native supervisor. The combined boot package,
+Dolby preservation and complete source/receiver lifecycle matrix still need
+hardware acceptance. Game DTS startup delay remains under investigation.
 
 The published v0.2.0 archive is the native-only release described below.
 

@@ -1,8 +1,10 @@
 from pathlib import Path
 import hashlib,importlib.util,json,tempfile,unittest
-from unittest.mock import patch
+from unittest.mock import patch,Mock
 spec=importlib.util.spec_from_file_location('global_install',Path(__file__).with_name('global_install.py'))
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+build_spec=importlib.util.spec_from_file_location('global_builder',Path(__file__).with_name('build-global-package.py'))
+b=importlib.util.module_from_spec(build_spec);build_spec.loader.exec_module(b)
 
 
 def elf(kind,machine):
@@ -13,13 +15,15 @@ def bundle(root):
     root.mkdir()
     for name in m.PAYLOAD:
         target=root/name;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(b'owned text\n')
-    for name,kind,machine in [('native/c5_es_poc.ko',2,183),('hdmi/broker-gate.ko',2,183),('hdmi/auto-route.ko',2,183),('native/plugins/libgstdtspassthrough.so',1,40)]:
+    for name,kind,machine in [('native/c5_es_poc.ko',2,183),('hdmi/broker-gate.ko',2,183),('hdmi/auto-route.ko',2,183),
+            ('hdmi_hd/broker-gate.ko',2,183),('hdmi_hd/auto-route.ko',2,183),('native/plugins/libgstdtspassthrough.so',1,40)]:
         (root/name).write_bytes(elf(kind,machine))
     native_files=['installer.py','configuration.py','supervisor.py','c5_es_poc.ko','plugins/libgstdtspassthrough.so']
     (root/'native/manifest.json').write_text(json.dumps({'schema':1,'kernel':m.KERNEL,'module_build':m.NATIVE_BUILD,
         'blocking_review_findings':[],'files':{p:m.sha(root/'native'/p) for p in native_files}}))
     hdmi_files=['broker-gate.ko','auto-route.ko','hdmi_supervisor.py','alsa_controls.py','luna_rpc.py','runtime_settings.py','edid.py','hpd.py']
     (root/'hdmi/hdmi-manifest.json').write_text(json.dumps({'schema':1,'kernel':m.KERNEL,'files':{p:m.sha(root/'hdmi'/p) for p in hdmi_files}}))
+    (root/'hdmi_hd/hdmi-manifest.json').write_text(json.dumps({'schema':1,'kernel':m.KERNEL,'files':{p:m.sha(root/'hdmi_hd'/p) for p in m.HD_FILES}}))
     seal(root)
     return root
 
@@ -41,6 +45,46 @@ class Tests(unittest.TestCase):
         (self.bundle/'hdmi/alsa_controls.py').write_text('changed')
         with self.assertRaises(RuntimeError):m.install(self.bundle,self.prefix,self.hook)
         self.assertFalse(self.prefix.exists());self.assertFalse(self.hook.exists())
+    def test_hd_artifact_or_manifest_change_is_rejected(self):
+        (self.bundle/'hdmi_hd/hd_controller.py').write_text('changed')
+        seal(self.bundle)
+        with self.assertRaisesRegex(RuntimeError,'HDMI-HD manifest mismatch'):m.install(self.bundle,self.prefix,self.hook)
+        self.assertFalse(self.hook.exists())
+
+    def test_builder_preserves_native_and_includes_hd_boot_controller(self):
+        output=self.root/'candidate';donor=self.bundle/'hdmi_hd'
+        modules={name:donor/name for name in ('broker-gate.ko','auto-route.ko')}
+        with patch.object(b,'verified_modules',return_value=modules),patch.object(b.subprocess,'run'):
+            manifest=b.build(self.bundle/'native',output,Path(__file__).resolve().parents[2],Path('objcopy'),donor,donor)
+        self.assertEqual(set(manifest['files']),m.PAYLOAD)
+        self.assertEqual((output/'native/supervisor.py').read_bytes(),(self.bundle/'native/supervisor.py').read_bytes())
+        self.assertEqual((output/'hdmi_hd/hdmi_hd_supervisor.py').read_bytes(),Path(__file__).with_name('hdmi_hd_supervisor.py').read_bytes())
+        with self.assertRaises(RuntimeError):b.build(self.bundle/'native',output,self.root,Path('unused'),donor)
+
+    def test_module_donor_requires_matching_hashes_and_approved_build(self):
+        donor=self.bundle/'hdmi_hd'
+        expected={name:m.sha(donor/name) for name in ('broker-gate.ko','auto-route.ko')}
+        self.assertEqual(set(b.verified_modules(donor,expected)),set(expected))
+        with self.assertRaises(RuntimeError):b.verified_modules(donor,{name:'0'*64 for name in expected})
+        (donor/'broker-gate.ko').write_text('changed')
+        with self.assertRaises(RuntimeError):b.verified_modules(donor)
+
+    def test_start_controller_requires_live_matching_readiness_and_command_path(self):
+        for kind in ['success','wrong pid','dead']:
+            with self.subTest(kind=kind):
+                run=self.root/kind
+                def popen(argv,**kwargs):
+                    self.assertEqual(kwargs['env']['PATH'],'/usr/sbin:/usr/bin:/sbin:/bin')
+                    ready=run/'hdmi-ready.json'
+                    ready.write_text(json.dumps({'pid':10 if kind=='wrong pid' else 20}));ready.chmod(0o600)
+                    return Mock(pid=20,poll=Mock(return_value=0 if kind=='dead' else None))
+                with patch.object(m.subprocess,'Popen',side_effect=popen) as start:
+                    if kind=='success':self.assertEqual(m.start_controller(self.bundle,run,'owned.py'),20)
+                    else:
+                        with self.assertRaises(RuntimeError):m.start_controller(self.bundle,run,'owned.py')
+                    self.assertEqual(start.call_count,1)
+                    with self.assertRaises(RuntimeError):m.start_controller(self.bundle,run,'owned.py')
+                    self.assertEqual(start.call_count,1)
     def test_wrong_architecture_is_rejected(self):
         (self.bundle/'hdmi/auto-route.ko').write_bytes(elf(2,62));seal(self.bundle)
         with self.assertRaisesRegex(RuntimeError,'architecture'):m.verify(self.bundle)
