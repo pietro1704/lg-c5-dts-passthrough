@@ -403,7 +403,10 @@ static GstFlowReturn native_receive_ready(DtsPass *s, gboolean wait) {
       g_usleep(10000);continue;
     }
     if(request_route(s)!=GST_FLOW_OK)goto failed;
-    if (g_get_monotonic_time() >= s->session_deadline) goto failed;
+    /* Downstream preroll can block this thread past the preparation deadline
+     * after the supervisor has already queued READY. Consume available replies
+     * first; the deadline bounds waiting, not scheduling of a received proof.
+     * native_drain still checks the current kernel lease before every buffer. */
     n = recv(s->session_fd, &byte, 1, MSG_DONTWAIT);
     if (n == 1) {
       guint expected_epoch=(guint)g_atomic_int_get(&s->stream_epoch);
@@ -414,6 +417,7 @@ static GstFlowReturn native_receive_ready(DtsPass *s, gboolean wait) {
       continue;
     }
     if (n == 0 || (errno != EAGAIN && errno != EINTR)) goto failed;
+    if (g_get_monotonic_time() >= s->session_deadline) goto failed;
     if (!wait) return GST_FLOW_OK;
     g_usleep(10000);
   } while (TRUE);

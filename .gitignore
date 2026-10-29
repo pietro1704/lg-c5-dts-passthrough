@@ -110,3 +110,4 @@
 !/experiments/hdmi-hd/test-hd-controller.py
 !/experiments/hdmi-hd/test-policy.c
 !/native/known-good-supervisor.py
+!/native/test-ready-receive.py

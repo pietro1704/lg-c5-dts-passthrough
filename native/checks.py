@@ -5,6 +5,7 @@ import sys
 import tempfile
 
 root=Path(__file__).resolve().parent
+subprocess.run([sys.executable,str(root/'test-ready-receive.py')],check=True)
 for name in ('supervisor','installer','configuration','package'):
     subprocess.run([sys.executable,str(root/('test-'+name+'.py'))],check=True)
 for name in ('alsa-controls','luna-rpc','supervisor','hd-supervisor','global-install','runtime-settings','hpd'):
