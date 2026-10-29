@@ -2,6 +2,7 @@ import tempfile,unittest,json,hashlib,os,shutil,subprocess
 from pathlib import Path
 from unittest.mock import patch
 import installer as i
+import errno
 
 def elf(kind,machine):
     value=bytearray(64);value[:4]=b'\x7fELF';value[4]=kind;value[5]=1;value[18:20]=machine.to_bytes(2,'little');return value
@@ -17,6 +18,20 @@ def bundle(root):
 class Installer(unittest.TestCase):
     def setUp(self):self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name);self.bundle=bundle(self.root/'bundle')
     def tearDown(self):self.temp.cleanup()
+    def test_bind_source_busy_rename_uses_guarded_inode_write(self):
+        registry=self.root/'mounted.bin';registry.write_bytes(b'original')
+        inode=i.identity(registry)
+        with patch.object(i.os,'replace',side_effect=OSError(errno.EBUSY,'mountpoint')):
+            i.replace_registry(registry,b'seeded registry',i.sha(registry))
+        self.assertEqual(i.identity(registry),inode)
+        self.assertEqual(registry.read_bytes(),b'seeded registry')
+    def test_mounted_write_failure_and_cancellation_restore_original(self):
+        for error in (OSError('fsync failed'),KeyboardInterrupt()):
+            registry=self.root/'mounted.bin';registry.write_bytes(b'original')
+            with patch.object(i.os,'fsync',side_effect=[error,None]):
+                with self.assertRaises(type(error)):
+                    i.rewrite_mounted_registry(registry,b'new longer registry',i.sha(registry),registry.stat())
+            self.assertEqual(registry.read_bytes(),b'original')
     def test_cold_registry_seed_is_persistent_and_reversible(self):
         registry=self.root/'cold.bin';registry.write_bytes(b'vendor registry')
         state=self.root/'seed'

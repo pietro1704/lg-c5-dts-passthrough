@@ -4,6 +4,7 @@
 Never unload the resident driver or restore controls over another session.
 """
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -35,6 +36,38 @@ def identity(path):
     info=Path(path).stat();return [info.st_dev,info.st_ino]
 
 
+def rewrite_mounted_registry(path,data,expected,info):
+    """A bind-source dentry cannot be renamed on webOS; retain its inode.
+
+    The caller has already fsynced the backup/journal. This bounded write does
+    not affect the separately bound live registry. Power loss can leave an
+    incomplete disk cache; GStreamer can regenerate it, and the backup remains.
+    """
+    original=path.read_bytes()
+    fd=os.open(path,os.O_RDWR|os.O_NOFOLLOW)
+    with os.fdopen(fd,'r+b',buffering=0) as output:
+        current=os.fstat(output.fileno())
+        if (current.st_dev,current.st_ino)!=(info.st_dev,info.st_ino) or sha(path)!=expected:
+            raise RuntimeError('mounted registry identity changed')
+        try:
+            offset=0
+            while offset<len(data):
+                written=output.write(data[offset:])
+                if not written:raise OSError('short registry write')
+                offset+=written
+            output.truncate(len(data));os.fsync(output.fileno())
+            if sha(path)!=hashlib.sha256(data).hexdigest():raise RuntimeError('cold registry readback mismatch')
+        except BaseException:
+            if identity(path)!=[info.st_dev,info.st_ino]:raise RuntimeError('foreign registry during write rollback')
+            output.seek(0);offset=0
+            while offset<len(original):
+                written=output.write(original[offset:])
+                if not written:raise OSError('short registry rollback')
+                offset+=written
+            output.truncate(len(original));os.fsync(output.fileno())
+            raise
+
+
 def replace_registry(path,data,expected):
     """Replace a regular, owned registry only while its identity still matches."""
     info=path.lstat()
@@ -50,7 +83,10 @@ def replace_registry(path,data,expected):
         if ((current.st_dev,current.st_ino,current.st_mtime_ns,current.st_ctime_ns)!=
                 (info.st_dev,info.st_ino,info.st_mtime_ns,info.st_ctime_ns) or sha(path)!=expected):
             raise RuntimeError('cold registry changed during preparation')
-        os.replace(name,path)
+        try:os.replace(name,path)
+        except OSError as error:
+            if error.errno!=errno.EBUSY:raise
+            rewrite_mounted_registry(path,data,expected,info)
         directory=os.open(path.parent,os.O_RDONLY)
         try:os.fsync(directory)
         finally:os.close(directory)
