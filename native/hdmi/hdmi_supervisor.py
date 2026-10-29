@@ -202,14 +202,16 @@ class Target:
             str(path),key+' '+str(value)])
 
     def recover(self,original):
-        state=self.scope(original.source_pointer)
+        pointer,generation=original.source_pointer,original.generation
+        state=self.scope(pointer,generation)
         if not state.adec_dts:
-            self.alsa.values(20,4,[1,48,0,0]);state=self.scope()
+            self.alsa.values(20,4,[1,48,0,0]);state=self.scope(pointer,generation)
         if not state.adec_started:
-            self.alsa.values(21,4,[1,0,0,0]);state=self.scope()
+            self.alsa.values(21,4,[1,0,0,0]);state=self.scope(pointer,generation)
         if not state.bound:
             (ROUTE/'bind_input').write_text('%d %x'%(state.generation,state.source_pointer))
-            state=self.scope()
+            # Only our successful bind may advance this recovery's identity.
+            state=self.scope(pointer,generation+1)
             if not state.bound:raise ScopeChanged('input bind changed')
         pointer,generation=state.source_pointer,state.generation
         self.route(120);self.scope(pointer,generation)

@@ -202,7 +202,8 @@ class Target:
             str(path),key+' '+str(value)])
 
     def recover(self,original):
-        state=self.scope(original.source_pointer)
+        pointer,generation=original.source_pointer,original.generation
+        state=self.scope(pointer,generation)
         before_graph=command(['/bin/cat','/proc/aaudio/dot_module_connection'])
         prior=set(re.findall(r'gain_([0-9a-f]{8})_\w+_out0\s*->\s*bypass_[0-9a-f]{8}_\w+_in0',before_graph))
         if len(prior)!=1:raise RuntimeError('compressed gain identity unavailable; no decoder activation')
@@ -210,12 +211,14 @@ class Target:
         self.property_write(prior_gain,'mute-input','true',state.source_pointer,state.generation)
         self.property_write(prior_gain,'mute-output','true',state.source_pointer,state.generation)
         if not state.adec_dts:
-            self.alsa.values(20,4,[1,51,0,0]);state=self.scope()
+            state=self.scope(pointer,generation)
+            self.alsa.values(20,4,[1,51,0,0]);state=self.scope(pointer,generation)
         if not state.adec_started:
-            self.alsa.values(21,4,[1,0,0,0]);state=self.scope()
+            self.alsa.values(21,4,[1,0,0,0]);state=self.scope(pointer,generation)
         if not state.bound:
             (ROUTE/'bind_input').write_text('%d %x'%(state.generation,state.source_pointer))
-            state=self.scope()
+            # Only our successful bind may advance this recovery's identity.
+            state=self.scope(pointer,generation+1)
             if not state.bound:raise ScopeChanged('input bind changed')
         pointer,generation=state.source_pointer,state.generation
         self.route(120);self.scope(pointer,generation)

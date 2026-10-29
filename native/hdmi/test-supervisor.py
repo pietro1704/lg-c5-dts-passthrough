@@ -2,6 +2,8 @@ import importlib.util
 from dataclasses import replace
 from pathlib import Path
 import sys,unittest
+from types import SimpleNamespace
+from unittest.mock import Mock,patch
 sys.path.insert(0,str(Path(__file__).parent))
 spec=importlib.util.spec_from_file_location('hdmi',Path(__file__).with_name('hdmi_supervisor.py'))
 m=importlib.util.module_from_spec(spec);sys.modules['hdmi']=m;spec.loader.exec_module(m)
@@ -29,6 +31,62 @@ class Backend:
 
 
 class Tests(unittest.TestCase):
+    def test_recovery_rejects_reused_source_before_any_decoder_write(self):
+        original=state()
+        for change in (dict(generation=2),dict(source_pointer=200),dict(native_idle=False),dict(physical_dts=False)):
+            with self.subTest(change=change):
+                target=object.__new__(m.Target)
+                target.snapshot=lambda:replace(original,**change)
+                target.alsa=SimpleNamespace(values=Mock(side_effect=AssertionError('stale decoder write')))
+                with self.assertRaises(m.ScopeChanged):target.recover(original)
+                target.alsa.values.assert_not_called()
+
+    def test_decoder_setup_cancels_if_source_generation_changes(self):
+        original=state()
+        snapshots=iter([original,replace(original,generation=2)])
+        target=object.__new__(m.Target)
+        target.snapshot=lambda:next(snapshots)
+        writes=[]
+        def values(control,*args):
+            writes.append(control)
+            if control!=20:raise AssertionError('new source decoder started')
+        target.alsa=SimpleNamespace(values=values)
+        with self.assertRaises(m.ScopeChanged):target.recover(original)
+        self.assertEqual(writes,[20])
+
+    def test_bind_accepts_only_its_own_generation_advance(self):
+        for advance in (1,2):
+            with self.subTest(advance=advance):
+                original=state(adec_dts=True,adec_started=True)
+                bound=replace(original,input_pointer=100,generation=original.generation+advance,
+                    transport=(1,2,48000))
+                current=[original]
+                target=object.__new__(m.Target)
+                target.snapshot=lambda:current[0]
+                target.input=Path('/test/hdmi/prop')
+                target.route=Mock()
+                target.alsa=SimpleNamespace(values=Mock(return_value=[2,1,0,0,0]))
+                writes=[]
+                def property_write(path,key,value,pointer,generation):
+                    target.scope(pointer,generation);writes.append((key,value))
+                target.property_write=property_write
+                bind=Mock()
+                bind.write_text.side_effect=lambda _:current.__setitem__(0,bound)
+                route=Mock();route.__truediv__=Mock(side_effect=lambda name:
+                    bind if name=='bind_input' else SimpleNamespace(read_text=lambda:'1'))
+                graph=('renderer_1_out100 -> mixer_0_in100\n'
+                    'mixer_0_out100 -> output_3_in0\n'
+                    'gain_01234567_1_out0 -> bypass_12345678_2_in0')
+                with patch.object(m,'ROUTE',route),patch.object(m,'command',return_value=graph),patch.object(Path,'is_file',return_value=True):
+                    if advance==1:
+                        target.recover(original)
+                        self.assertEqual(target.owned,(100,2))
+                        self.assertEqual(writes[-2:],[('mute-input','false'),('mute-output','false')])
+                    else:
+                        with self.assertRaises(m.ScopeChanged):target.recover(original)
+                        target.route.assert_not_called();target.alsa.values.assert_not_called()
+                        self.assertEqual(writes,[])
+
     def test_initial_unknown_decoder_is_recovered(self):
         b=Backend(state());c=m.Controller(b)
         self.assertEqual(c.tick(),'recovered');self.assertTrue(c.active)
