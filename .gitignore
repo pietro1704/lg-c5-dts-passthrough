@@ -113,3 +113,5 @@
 !/native/test-ready-receive.py
 !/native/test-latency-target.inc
 !/native/test-cold-registry-target.py
+!/native/build-clock-isolation.sh
+!/native/test-clock-isolation.c

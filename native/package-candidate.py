@@ -20,7 +20,7 @@ SOURCES = {
     'configuration.py': 'configuration.py',
     'installer.py': 'installer.py',
 }
-BLOCKERS = ['P2: retained originals duplicate preparation timestamps; synchronized target test and vendor A/V validation pending']
+BLOCKERS = ['P2: target proof of preparation before preroll without added latency is missing']
 KNOWN_GOOD_SUPERVISOR='6077f3cf1b4cd815513677947efa850cee84b464f3baedbdc5a620066a04e0fe'
 
 
@@ -46,7 +46,9 @@ def validate_clock_evidence(path, bundle):
         if (run.get('plugin_sha256')!=sha(bundle/'plugins/libgstdtspassthrough.so') or
             run.get('module_sha256')!=sha(bundle/'c5_es_poc.ko') or
             run.get('audio_device_opened') is not False or run.get('kernel_audio_hooks') is not False or
-            run.get('model_latency_seconds')!=0 or run.get('untimed_preparation') is not False or run.get('mock_errors')):
+            run.get('model_latency_seconds')!=0 or run.get('untimed_preparation') is not False or run.get('mock_errors') or
+            run.get('reported_latency_ns')!=0 or run.get('buffers_before_ready')!=0 or
+            run.get('lease_backend') not in ('kernel-api-only','userspace-isolated')):
             raise ValueError('clock evidence does not identify this isolated automatic candidate')
         if run.get('expected_timeout') is True:
             if run.get('pipeline_error') is not True or run.get('captured_original_bytes')!=0 or run.get('ready_delay_seconds',0)<1.5:
@@ -101,7 +103,7 @@ def build(source, output, objcopy, clock_evidence=None, known_good_supervisor=Fa
             'unresolved_acceptance': ['DTS-HD MA and channel identity in original Nuvio',
                 'vendor sink and actual video/audio synchronization',
                 'DTS core and Dolby preservation', 'pause/seek/track/cancel/reboot stability',
-                'cause of prior V2 TV freeze remains undetermined'],
+                'native route confirmation before first sink buffer'],
             'input_sha256': inputs,
             'files': {name: sha(temporary/name) for name in sorted(FILES)},
         }

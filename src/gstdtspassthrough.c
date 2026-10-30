@@ -15,7 +15,6 @@
 #ifndef DTS_NATIVE_SESSION
 #define DTS_NATIVE_SESSION 0
 #endif
-#define DTS_PREPARATION_LATENCY (2 * GST_SECOND)
 #define DTS_PREPARATION_TIMEOUT_US (1500 * 1000)
 
 typedef struct {
@@ -41,7 +40,6 @@ typedef struct {
   gsize held_bytes;
   GMutex file_lock;
   gint stream_epoch, user_paused, regate, lease_needs_resume, control_broken;
-  gint native_latency;
   struct dts_ready_parser reply;
   gint64 session_deadline;
 } DtsPass;
@@ -55,31 +53,6 @@ static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE(
     "src", GST_PAD_SRC, GST_PAD_ALWAYS,
     GST_STATIC_CAPS("audio/x-raw, format=(string)S16LE, layout=(string)interleaved, "
                    "rate=(int)[1,384000], channels=(int){2,8}"));
-
-static void set_native_latency(DtsPass *s,gboolean enabled) {
-  if(g_atomic_int_exchange(&s->native_latency,enabled)!=enabled)
-    gst_element_post_message(GST_ELEMENT(s),gst_message_new_latency(GST_OBJECT(s)));
-}
-
-static gboolean src_query(GstPad *pad,GstObject *parent,GstQuery *query) {
-  DtsPass *s=(DtsPass *)parent;
-  if(GST_QUERY_TYPE(query)==GST_QUERY_LATENCY) {
-    gboolean live;GstClockTime minimum,maximum;
-    if(!gst_pad_peer_query(s->sink,query))return FALSE;
-    gst_query_parse_latency(query,&live,&minimum,&maximum);
-    if(g_atomic_int_get(&s->native_latency)) {
-      if(minimum>GST_CLOCK_TIME_NONE-DTS_PREPARATION_LATENCY-1 ||
-         (GST_CLOCK_TIME_IS_VALID(maximum) && maximum>GST_CLOCK_TIME_NONE-DTS_PREPARATION_LATENCY-1))return FALSE;
-      minimum+=DTS_PREPARATION_LATENCY;
-      if(GST_CLOCK_TIME_IS_VALID(maximum))maximum+=DTS_PREPARATION_LATENCY;
-      /* Preparation waits for an external renderer. Advertise it to the whole
-       * pipeline so video and audio keep one clock; never shift audio PTS. */
-      gst_query_set_latency(query,TRUE,minimum,maximum);
-    }
-    return TRUE;
-  }
-  return gst_pad_query_default(pad,parent,query);
-}
 
 static void end_native_session(DtsPass *s) {
   g_mutex_lock(&s->file_lock);
@@ -277,7 +250,6 @@ static gboolean configure(DtsPass *s, gboolean hd, gint rate, gint profile) {
     if(resumed){end_native_session(s);return FALSE;}
   }
   if(g_atomic_int_get(&s->stream_epoch)==G_MAXINT)return FALSE;
-  set_native_latency(s,hd && DTS_NATIVE_SESSION && !s->file_test && !s->silent_probe);
   if (hd && s->silent_probe && !s->file_test) probe_native_sink(s);
   s->hd = hd;
   s->profile = profile;
@@ -576,25 +548,16 @@ static GstFlowReturn push_frame(DtsPass *s, uint8_t *data, gint size) {
   if (GST_CLOCK_TIME_IS_VALID(pts)) s->next_pts = pts + duration;
   ++s->frames;
   if (hd && s->session_fd >= 0 && !s->session_ready) {
-    GstBuffer *silence;
     if (s->held_bytes + gst_buffer_get_size(buffer) > 32 * 1024 * 1024) {
       gst_buffer_unref(buffer); return GST_FLOW_ERROR;
     }
     g_queue_push_tail(&s->held_buffers, buffer);
     s->held_bytes += gst_buffer_get_size(buffer);
-    silence = gst_buffer_copy_deep(buffer);
-    if (!silence) return GST_FLOW_ERROR;
-    gst_buffer_memset(silence, 0, 0, gst_buffer_get_size(silence));
-    /* Warm the renderer without advancing media time. Original PTS/duration
-     * stay untouched and are scheduled using the advertised pipeline latency. */
-    GST_BUFFER_PTS(silence)=GST_CLOCK_TIME_NONE;
-    GST_BUFFER_DTS(silence)=GST_CLOCK_TIME_NONE;
-    GST_BUFFER_DURATION(silence)=0;
-    result = gst_pad_push(s->src, silence);
-    if (result != GST_FLOW_OK) return result;
-    result=request_route(s);
-    if(result!=GST_FLOW_OK)return result;
-    result = native_receive_ready(s, FALSE);
+    /* Caps prepare the native ES renderer. Await proof before completing
+     * downstream preroll: a synthetic buffer starts the shared A/V clock too
+     * early, and compensating with latency underflows this vendor's clock.
+     * Keep every original byte and PTS until the current lease is confirmed. */
+    result = native_receive_ready(s, TRUE);
     if (result != GST_FLOW_OK) return result;
     return s->session_ready ? native_drain(s) : GST_FLOW_OK;
   }
@@ -769,11 +732,6 @@ static GstStateChangeReturn change_state(GstElement *element, GstStateChange tra
     suspend_session(s,TRUE);
   }
   if(result!=GST_STATE_CHANGE_FAILURE && transition==GST_STATE_CHANGE_PAUSED_TO_READY) {
-    /* decodebin removes us while holding its state/stream locks. A synchronous
-     * LATENCY bus handler can reenter the pipeline before teardown completes.
-     * This element no longer contributes latency; clear it without notifying
-     * from teardown. A new configured stream advertises its latency normally. */
-    g_atomic_int_set(&s->native_latency,FALSE);
     reset_stream(s);end_native_session(s);
     gst_event_replace(&s->segment,NULL);
   }
@@ -807,7 +765,6 @@ static void dts_pass_init(DtsPass *s) {
   s->src = gst_pad_new_from_static_template(&src_template, "src");
   gst_pad_set_chain_function(s->sink, chain);
   gst_pad_set_event_function(s->sink, event);
-  gst_pad_set_query_function(s->src,src_query);
   gst_element_add_pad(GST_ELEMENT(s), s->sink);
   gst_element_add_pad(GST_ELEMENT(s), s->src);
   s->encoded = g_byte_array_new();

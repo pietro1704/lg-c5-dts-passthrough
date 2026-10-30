@@ -56,11 +56,23 @@ The plugin checks complete DTS packets, packs IEC61937 and marks native HD buffe
 
 The exact-build controller associates renderer0/1 with authenticated process leases, generation and epoch. It connects the owned compressed path to eARC and protects codec7 callback handling. SHA256 fingerprints guard firmware-specific locations. No firmware instructions are distributed.
 
-Startup retains originals while preparing the renderer with untimed silence. Two seconds of pipeline latency keep other sinks on the same clock without shifting original audio PTS. Route confirmation has a1.5-second deadline; failure sends no original audio to an unconfirmed route. Pause suspends the lease; resume requires fresh proof.
+Startup retains originals after sending caps and waits for route confirmation before the first output buffer completes preroll. It adds no artificial latency and never shifts original audio PTS. The previous two-second latency could underflow the vendor audio/video clock during track changes. Route confirmation has a1.5-second deadline; failure sends no original audio to an unconfirmed route. Pause suspends the lease; resume requires fresh proof. Confirmation before preroll still requires acceptance on the native hardware path.
 
 The supervisor rejects ambiguous owners, stale epochs, changed plugin inodes and unexpected formats. Vendor-command failure stops routing writes. Refresh revalidates ownership before writing; the vendor ALSA interface offers no atomic compare-and-set across unrelated applications.
 
 ## Build and test
+
+For clock regressions while a real controller is resident, build the test-only
+adapter with `C5_CLOCK_OUTPUT=<existing-directory> bash native/build-clock-isolation.sh`.
+Run `native/test-clock-target.py --isolated --require-preroll` on the target with
+`LD_PRELOAD=<adapter-directory>/clock-isolation.so` and
+`C5_CLOCK_SOCKET=/tmp/c5-clock-<unique-test>/control.sock`, plus the existing
+module/plugin/fixture arguments shown by `--help`. This runs the unchanged
+production plugin with real GStreamer clocks and appsinks; only the lease and
+control socket are simulated. It never opens an audio device or loads/unloads
+a kernel module. It is not proof of the vendor renderer's readiness. Delayed
+READY, fragmented input, timeout, cancellation, disconnect and stale/future
+epochs are separate cases. Never preload this adapter in a real player.
 
 Obtain verified, target-matched prerequisites separately. No firmware, kernel image, libraries, sysroot, toolchain or media is included. Build only this project's targets:
 

@@ -45,6 +45,7 @@ class Package(unittest.TestCase):
         success={'plugin_sha256':installer.sha(self.source/'libgstdtspassthrough.so'),
                  'module_sha256':installer.sha(self.source/'module/c5_es_poc.ko'),
                  'audio_device_opened':False,'kernel_audio_hooks':False,
+                 'reported_latency_ns':0,'buffers_before_ready':0,'lease_backend':'userspace-isolated',
                  'model_latency_seconds':0,'untimed_preparation':False,'mock_errors':[],
                  'expected_timeout':False,'pipeline_error':False,'ready_delay_seconds':1.4,
                  'fragment_size':337,'byte_identity_preserved':True,'original_pts_unchanged':True,
@@ -73,6 +74,18 @@ class Package(unittest.TestCase):
 
     def test_manual_latency_override_is_not_automatic_proof(self):
         evidence=self.evidence(lambda d:d['runs'][0].update(model_latency_seconds=2))
+        with self.assertRaises(ValueError):self.build(evidence)
+
+    def test_plugin_added_latency_is_rejected_even_when_payload_is_preserved(self):
+        evidence=self.evidence(lambda d:d['runs'][0].update(reported_latency_ns=2_000_000_000))
+        with self.assertRaises(ValueError):self.build(evidence)
+
+    def test_synthetic_preroll_before_ready_is_rejected(self):
+        evidence=self.evidence(lambda d:d['runs'][0].update(buffers_before_ready=1))
+        with self.assertRaises(ValueError):self.build(evidence)
+
+    def test_unknown_isolation_backend_is_rejected(self):
+        evidence=self.evidence(lambda d:d['runs'][0].update(lease_backend='unknown'))
         with self.assertRaises(ValueError):self.build(evidence)
 
     def test_missing_fragmentation_case_rejected(self):
