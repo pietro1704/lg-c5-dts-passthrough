@@ -33,33 +33,23 @@ disc language/track. A brief PCM receiver label can appear during the transition
 in the captured DD → MA switch, MA output appeared about one second after the
 first observed DTS-HD input sample. Sustained PCM is not successful MA acceptance.
 
-The published v0.2.0 archive is the native-only release described below.
+### Installation documentation
 
-The global installer also seeds the persistent GStreamer registry for the next
-cold boot, retaining a verified backup. Media workers preloaded before the
-Homebrew hook otherwise cache a catalog without the DTS bridge and can omit
-the DTS track after reopening Nuvio. Seeding preserves current playback;
-`disable-boot` restores the backup only if the seeded disk registry still matches.
-An interrupted preparation can be retried with `prepare-cold-boot`. A complete
-reboot and Nuvio reopen/AC3/DTS acceptance passed with the final native
-artifact. Replacement artifacts require their own target acceptance.
+**v0.3.0 is a source-only prerelease, not an installable global binary package.**
+The older v0.2.0 native binary does not contain the current fixes. Do not run the
+installer directly from the source archive.
 
-Extract the release archive on the TV as root. It contains only this project's plugin, controller, scripts, manifest and license/documentation files. Required GStreamer/FFmpeg runtime libraries come from the compatible restoration patch; they are not redistributed.
+See the [project wiki](docs/wiki/Home.md) for the
+[installation and recovery guide](docs/wiki/Installation.md),
+[package prerequisites](docs/wiki/Architecture.md),
+[test matrix](docs/wiki/Testing.md) and
+[troubleshooting](docs/wiki/Troubleshooting.md).
 
-```sh
-python3 installer.py dry-run
-python3 installer.py install-boot
-```
-
-`install-boot` verifies hashes/architectures, stages an immutable version under `/home/root/c5-dts-passthrough` and creates `zz-c5-dts-passthrough` in the Homebrew init directory. The hook waits for the original restoration overrides. Installation preserves current playback and does not restart the TV. **First reboot still needs validation.**
-
-To disable future activation while preserving the current session:
-
-```sh
-python3 /home/root/c5-dts-passthrough/current/installer.py disable-boot
-```
-
-For an explicitly requested temporary trial, use `activate --allow-hardware-trial`. `deactivate` restores only bindings owned by that activation and refuses active leases. A controller used for audio stays resident until reboot; never force an unload or restart broad audio services.
+For an already built, verified global bundle, run `python3 global_install.py
+dry-run` from its root, then `python3 global_install.py install-boot` as root on
+the supported TV. Follow the full guide for migration, cold-registry preparation,
+reboot acceptance and disabling boot. Installation preserves current playback;
+new or rebuilt artifacts require their own acceptance.
 
 ## How it works
 
