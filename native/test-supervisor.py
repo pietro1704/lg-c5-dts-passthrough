@@ -222,6 +222,60 @@ class RouteLoop(unittest.TestCase):
         self.kernel.vendor_read.side_effect=[graph(1),DSP]
         self.service=s.Supervisor(self.kernel,Path('/unused'),'unused',Path(self.temp.name)/'STOP')
     def tearDown(self):self.temp.cleanup()
+    def test_recreated_renderer_gets_fresh_refresh_budget(self):
+        # A real track change can replace the renderer without changing the
+        # plugin's stream epoch. The first renderer consumed both refreshes;
+        # its replacement has no route proof until another guarded refresh.
+        initial=state(1)
+        current=[replace(initial,leases=(replace(initial.leases[0],routes=0,hd=0,proof_epoch=0),*initial.leases[1:]))]
+        now=[0.0];calls=[]
+        self.kernel.state.side_effect=lambda:current[0]
+        self.kernel.vendor_read.side_effect=lambda path:graph(1) if path.endswith('dot_block_connection') else DSP
+        def refresh(guard):
+            guard();calls.append(current[0].leases[0].captures)
+            if len(calls)==2:
+                current[0]=replace(initial,leases=(replace(initial.leases[0],captures=2,invalidations=1,routes=0,hd=0,proof_epoch=0),*initial.leases[1:]))
+            elif len(calls)==3:
+                current[0]=replace(initial,leases=(replace(initial.leases[0],captures=2,invalidations=1),*initial.leases[1:]))
+        self.kernel.refresh.side_effect=refresh
+        def sleep(delay):now[0]+=delay
+        with patch.object(s,'verify_worker',return_value='start'),patch.object(s,'verify_plugin'),patch.object(s.time,'monotonic',side_effect=lambda:now[0]),patch.object(s.time,'sleep',side_effect=sleep):
+            self.assertEqual(self.service.route(123,'start',9),1)
+        self.assertEqual(calls,[1,1,2])
+    def test_refreshes_remain_bounded_with_renderer_churn(self):
+        for replace_renderer,expected in ((False,2),(True,4)):
+            with self.subTest(replace_renderer=replace_renderer):
+                initial=state(1);lease=replace(initial.leases[0],routes=0,hd=0,proof_epoch=0)
+                current=[replace(initial,leases=(lease,*initial.leases[1:]))]
+                now=[0.0];calls=[]
+                self.kernel.state.side_effect=lambda:current[0]
+                def refresh(guard):
+                    guard();calls.append(True)
+                    if replace_renderer:
+                        old=current[0].leases[0]
+                        current[0]=replace(current[0],leases=(replace(old,captures=old.captures+1,invalidations=old.invalidations+1),*current[0].leases[1:]))
+                self.kernel.refresh.side_effect=refresh
+                def sleep(delay):now[0]+=delay
+                with patch.object(s,'verify_worker',return_value='start'),patch.object(s,'verify_plugin'),patch.object(s.time,'monotonic',side_effect=lambda:now[0]),patch.object(s.time,'sleep',side_effect=sleep):
+                    with self.assertRaises(TimeoutError):self.service.route(123,'start',9)
+                self.assertEqual(len(calls),expected)
+    def test_replacement_between_refresh_read_and_write_is_rejected(self):
+        initial=state(1)
+        pending=replace(initial,leases=(replace(initial.leases[0],routes=0,hd=0),*initial.leases[1:]))
+        replacement=replace(pending,leases=(replace(pending.leases[0],captures=2,invalidations=1),*pending.leases[1:]))
+        current=[pending];calls=[];writes=[]
+        self.kernel.state.side_effect=lambda:current[0]
+        self.kernel.vendor_read.side_effect=lambda path:graph(1) if path.endswith('dot_block_connection') else DSP
+        def refresh(guard):
+            calls.append(True)
+            if len(calls)==1:current[0]=replacement
+            guard();writes.append(current[0].leases[0].captures)
+            current[0]=replace(initial,leases=(replace(initial.leases[0],captures=2,invalidations=1),*initial.leases[1:]))
+        self.kernel.refresh.side_effect=refresh
+        with patch.object(s,'verify_worker',return_value='start'),patch.object(s,'verify_plugin'):
+            self.assertEqual(self.service.route(123,'start',9),1)
+        self.assertEqual(len(calls),2)
+        self.assertEqual(writes,[2])
     def test_lease_revoked_while_waiting_refresh_lock(self):
         active=state(1)
         active=replace(active,leases=(replace(active.leases[0],routes=0,hd=0),*active.leases[1:]))
