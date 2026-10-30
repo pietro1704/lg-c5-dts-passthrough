@@ -33,23 +33,33 @@ disc language/track. A brief PCM receiver label can appear during the transition
 in the captured DD → MA switch, MA output appeared about one second after the
 first observed DTS-HD input sample. Sustained PCM is not successful MA acceptance.
 
-### Installation documentation
+### Instalar ou remover na TV
 
-**v0.3.0 is a source-only prerelease, not an installable global binary package.**
-The older v0.2.0 native binary does not contain the current fixes. Do not run the
-installer directly from the source archive.
+Baixe **[lg-c5-dts-passthrough-v0.4.0-tv.tar.gz](https://github.com/pietro1704/lg-c5-dts-passthrough/releases/tag/v0.4.0)**
+(não escolha “Source code”), copie para a TV e, no terminal SSH como root:
 
-See the [project wiki](docs/wiki/Home.md) for the
-[installation and recovery guide](docs/wiki/Installation.md),
-[package prerequisites](docs/wiki/Architecture.md),
-[test matrix](docs/wiki/Testing.md) and
-[troubleshooting](docs/wiki/Troubleshooting.md).
+```sh
+tar -xzf lg-c5-dts-passthrough-v0.4.0-tv.tar.gz
+cd lg-c5-dts-passthrough-v0.4.0
+sh install.sh
+```
 
-For an already built, verified global bundle, run `python3 global_install.py
-dry-run` from its root, then `python3 global_install.py install-boot` as root on
-the supported TV. Follow the full guide for migration, cold-registry preparation,
-reboot acceptance and disabling boot. Installation preserves current playback;
-new or rebuilt artifacts require their own acceptance.
+Após “Instalação concluída”, reinicie a TV manualmente.
+Para desfazer, na mesma pasta: **`sh remove.sh`**, depois reinicie manualmente.
+A remoção desativa esta integração, restaura o registro anterior e preserva o
+`dts_restore` e as versões guardadas. Não faz reset de fábrica.
+
+**Pré-requisitos:** LG C5 no firmware/kernel acima, root, Homebrew, Python 3,
+`dts_restore-2.0` compatível já instalado e receiver eARC/DTS. Não precisa
+reinstalar se já está funcionando; outro pacote instalado é preservado e recusado.
+
+[Guia curto de instalação](INSTALL.md) ·
+[Wiki](https://github.com/pietro1704/lg-c5-dts-passthrough/wiki) ·
+[Testes e limites](docs/wiki/Testing.md)
+
+Os scripts novos são testados no CI; esta release reutiliza os binários aceitos
+anteriormente e não foi testada novamente em TV real. A v0.3.0 permanece somente
+de fontes; o binário da v0.2.0 não contém as correções atuais.
 
 ## How it works
 

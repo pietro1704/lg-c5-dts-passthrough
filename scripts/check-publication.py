@@ -3,7 +3,13 @@ import ast
 import re
 import subprocess
 
-ALLOWED = {'docs/wiki/Home.md',
+ALLOWED = {'install.sh',
+ 'remove.sh',
+ 'tv-package.py',
+ 'INSTALL.md',
+ 'scripts/build-tv-release.py',
+ 'tests/test-tv-package.py',
+ 'docs/wiki/Home.md',
  'docs/wiki/Installation.md',
  'docs/wiki/Architecture.md',
  'docs/wiki/Testing.md',

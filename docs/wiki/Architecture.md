@@ -23,7 +23,8 @@ firmware; hashes e guardas não tornam outros aparelhos compatíveis.
 
 ## Preparação pelo mantenedor
 
-Não existe build completo a partir apenas do download público. Obtenha
+A release v0.4.0 fornece binários próprios já aceitos e scripts de instalação.
+Não existe rebuild completo a partir apenas do download público de fontes. Obtenha
 separadamente toolchain pré-compilada, headers/libs do alvo, headers FFmpeg 5 e
 árvores de kernel C5 já preparadas. Não compile dependências implicitamente.
 Antes de builds grandes, execute `python3 native/storage-preflight.py`:
@@ -62,3 +63,14 @@ mantenedor; não há promessa de build reproduzível com toolchain arbitrária.
 Hashes de manifestos conferem consistência, não autenticam o distribuidor.
 Use artefatos de procedência conhecida e não modifique guardas para aprovar um
 novo firmware. Nenhuma biblioteca de firmware ou mídia deve entrar no Git.
+
+## Publicar o pacote de TV
+
+`scripts/build-tv-release.py` recebe `--bundle`, `--output` e `--version`.
+Ele confere o pacote global, os hashes exatos dos seis binários aceitos e os
+scripts de runtime contra as fontes atuais. Copia somente a lista permitida,
+acrescenta `install.sh`, `remove.sh`, `tv-package.py` e `INSTALL.md`, atualiza o
+README do pacote e verifica padrões de conteúdo privado. Não acessa aparelhos.
+O arquivo de fontes correspondente deve acompanhar a release junto com os
+checksums. Binários de um novo build precisam de aceitação antes de atualizar
+os hashes permitidos; a CI usa ELF sintético para testar o empacotamento.

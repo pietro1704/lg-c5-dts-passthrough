@@ -12,6 +12,8 @@ node --test tests/verify-iec.test.mjs
 bash -n native/build-module.sh
 bash -n native/build-clock-isolation.sh
 python3 native/checks.py
+sh -n install.sh remove.sh
+python3 tests/test-tv-package.py
 ```
 
 O check de publicação examina os bytes no **index do Git**; adicione somente
@@ -32,6 +34,13 @@ Os ensaios `native/test-clock-target.py` e `native/test-cold-registry-target.py`
 são específicos do alvo. O primeiro dispõe de modo isolado com memory sinks e
 adaptador de teste; veja o README e `--help`. Não os confunda com CI de host.
 Nunca carregue o adaptador de teste em um player real.
+
+A suíte `tests/test-tv-package.py` executa os scripts de shell extraídos do arquivo
+de release e exercita instalação, repetição, remoção e restauração com arquivos
+temporários. Usa as funções reais de backup/journal, substituindo somente acesso
+a hardware e inspeção GStreamer. Cobre falha/cancelamento, kernel errado,
+identidades alteradas, locks, instalação existente, arquivo parcial e publicação
+sem logs privados. Os novos scripts não foram executados na TV real.
 
 ## Aceitação de cada novo pacote
 
