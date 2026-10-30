@@ -20,11 +20,34 @@ def verified_modules(donor,expected=None):
     return {name:donor/name for name in ('broker-gate.ko','auto-route.ko')}
 
 
+def verified_native(donor):
+    """Reject untrusted manifest paths before any staging or output writes."""
+    donor=Path(donor)
+    if donor.is_symlink():raise RuntimeError('symlink native donor')
+    manifest_path=donor/'manifest.json'
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise RuntimeError('nonregular native manifest')
+    manifest=json.loads(manifest_path.read_text())
+    allowed={name[len('native/'):] for name in installer.PAYLOAD
+        if name.startswith('native/') and name!='native/manifest.json'}
+    if (manifest.get('schema')!=1 or manifest.get('kernel')!=installer.KERNEL or
+        manifest.get('module_build')!=installer.NATIVE_BUILD or
+        manifest.get('blocking_review_findings') or
+        set(manifest.get('files',{}))!=allowed):
+        raise RuntimeError('unverified native prerequisite')
+    for name,digest in manifest['files'].items():
+        path=donor
+        for part in Path(name).parts:
+            path=path/part
+            if path.is_symlink():raise RuntimeError('symlink native donor component')
+        if not path.is_file() or installer.sha(path)!=digest:
+            raise RuntimeError('native donor changed')
+    return manifest
+
+
 def build(native,output,project,objcopy,hd_donor,hdmi_donor=None):
     if output.exists() or output.is_symlink():raise RuntimeError('output already exists')
-    native_manifest=json.loads((native/'manifest.json').read_text())
-    for name,digest in native_manifest['files'].items():
-        if installer.sha(native/name)!=digest:raise RuntimeError('native donor changed')
+    native_manifest=verified_native(native)
     hd_modules=verified_modules(hd_donor,{
         'broker-gate.ko':'add58c20c8d71a6e52a54a669aaa2fed06854e9792031ba6a1b1aa85e4643a92',
         'auto-route.ko':'68e85ab974a5b8ca11fa61ce2eae37153e3d655ce21e103afdfe5a742aa09982'})
