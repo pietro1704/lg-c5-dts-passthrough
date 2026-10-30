@@ -44,6 +44,7 @@ O empacotador global recebe explicitamente os insumos:
 
 ```sh
 python3 native/hdmi/build-global-package.py \
+  --project /path/to/lg-c5-dts-passthrough \
   --native /path/to/verified-native-package \
   --output /path/to/new-global-package \
   --objcopy /path/to/llvm-objcopy \
