@@ -2,9 +2,9 @@
 
 Experimental TV-wide integration for the original Nuvio and native GStreamer players. The bridge parses and packs the original DTS bitstream; it never decodes, downmixes or transcodes it. Every payload, including the MA extension, is checked byte for byte.
 
-**Confirmed on 30 October 2026:** the saved preparation prototype activated automatically after a full TV reboot. Nuvio 1.2.9 passed first playback, DD → DTS-HD MA, pause/resume and closing/reopening with a new native media worker. Video advanced without a media error, normal lipsync was restored, and the user confirmed DTS-HD MA on the receiver with correct sound. An earlier native-player clip verified all six channels. Supported target: LG C5, firmware33.31.68, kernel `5.4.268-329.ptl4tv.5`, rooted webOS, existing compatible `dts_restore-2.0` integration and eARC receiver. Other models/firmware are refused or unverified.
+**Confirmed on 30 October 2026:** the final native artifact activated automatically after a full TV reboot. Nuvio 1.2.9 passed first playback, DD → DTS-HD MA, three consecutive pause/resume cycles and closing/reopening with a new authenticated native media worker. Video advanced without a media error; the DSP reported DTS-HD MA at eight-channel/192kHz transport with normal lipsync restored. An earlier native-player clip verified all six channels. Supported target: LG C5, firmware33.31.68, kernel `5.4.268-329.ptl4tv.5`, rooted webOS, existing compatible `dts_restore-2.0` integration and eARC receiver. Other models/firmware are refused or unverified.
 
-This is experimental. The final native artifact also passed target clock tests and real Nuvio DD → MA, seek, repeated pause/resume and app reopen checks. It is staged for boot with the preceding package retained for recovery; its own reboot acceptance is pending. Extended lifecycle stability, measured A/V sync and the complete Dolby/source matrix remain pending. A DTS lossy label while the receiver shows MA after an HD session is under investigation. Receiver labels alone do not prove the encoded profile.
+This is experimental. The final native artifact also passed target clock tests and real Nuvio seek checks before reboot. The preceding package remains retained for recovery. Extended lifecycle stability, measured A/V sync and the complete Dolby/source matrix remain pending. A DTS lossy label while the receiver shows MA after an HD session is under investigation. Receiver labels alone do not prove the encoded profile.
 
 ## Install on the supported TV
 
@@ -31,8 +31,8 @@ Homebrew hook otherwise cache a catalog without the DTS bridge and can omit
 the DTS track after reopening Nuvio. Seeding preserves current playback;
 `disable-boot` restores the backup only if the seeded disk registry still matches.
 An interrupted preparation can be retried with `prepare-cold-boot`. A complete
-reboot and Nuvio reopen/AC3/DTS acceptance passed with the saved preparation
-prototype. Replacement artifacts require their own target acceptance.
+reboot and Nuvio reopen/AC3/DTS acceptance passed with the final native
+artifact. Replacement artifacts require their own target acceptance.
 
 Extract the release archive on the TV as root. It contains only this project's plugin, controller, scripts, manifest and license/documentation files. Required GStreamer/FFmpeg runtime libraries come from the compatible restoration patch; they are not redistributed.
 
