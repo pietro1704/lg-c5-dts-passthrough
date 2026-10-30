@@ -2,6 +2,8 @@
  * Experimental transport bridge. It parses and packs DTS; it never decodes.
  * Rank NONE deliberately prevents automatic use by native applications.
  */
+#define _GNU_SOURCE
+#include <dlfcn.h>
 #include <gst/gst.h>
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -15,7 +17,6 @@
 #ifndef DTS_NATIVE_SESSION
 #define DTS_NATIVE_SESSION 0
 #endif
-#define DTS_PREPARATION_LATENCY (2 * GST_SECOND)
 #define DTS_PREPARATION_TIMEOUT_US (1500 * 1000)
 
 typedef struct {
@@ -41,9 +42,14 @@ typedef struct {
   gsize held_bytes;
   GMutex file_lock;
   gint stream_epoch, user_paused, regate, lease_needs_resume, control_broken;
-  gint native_latency;
   struct dts_ready_parser reply;
   gint64 session_deadline;
+  gint64 next_prepare;
+  gboolean preparation_started;
+  guint preparation_epoch, preparation_feeds;
+  GstElement *preparation_sink;
+  gpointer preparation_handle;
+  gint preparation_lipsync;
 } DtsPass;
 typedef struct { GstElementClass parent; } DtsPassClass;
 G_DEFINE_TYPE(DtsPass, dts_pass, GST_TYPE_ELEMENT)
@@ -56,32 +62,11 @@ static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE(
     GST_STATIC_CAPS("audio/x-raw, format=(string)S16LE, layout=(string)interleaved, "
                    "rate=(int)[1,384000], channels=(int){2,8}"));
 
-static void set_native_latency(DtsPass *s,gboolean enabled) {
-  if(g_atomic_int_exchange(&s->native_latency,enabled)!=enabled)
-    gst_element_post_message(GST_ELEMENT(s),gst_message_new_latency(GST_OBJECT(s)));
-}
-
-static gboolean src_query(GstPad *pad,GstObject *parent,GstQuery *query) {
-  DtsPass *s=(DtsPass *)parent;
-  if(GST_QUERY_TYPE(query)==GST_QUERY_LATENCY) {
-    gboolean live;GstClockTime minimum,maximum;
-    if(!gst_pad_peer_query(s->sink,query))return FALSE;
-    gst_query_parse_latency(query,&live,&minimum,&maximum);
-    if(g_atomic_int_get(&s->native_latency)) {
-      if(minimum>GST_CLOCK_TIME_NONE-DTS_PREPARATION_LATENCY-1 ||
-         (GST_CLOCK_TIME_IS_VALID(maximum) && maximum>GST_CLOCK_TIME_NONE-DTS_PREPARATION_LATENCY-1))return FALSE;
-      minimum+=DTS_PREPARATION_LATENCY;
-      if(GST_CLOCK_TIME_IS_VALID(maximum))maximum+=DTS_PREPARATION_LATENCY;
-      /* Preparation waits for an external renderer. Advertise it to the whole
-       * pipeline so video and audio keep one clock; never shift audio PTS. */
-      gst_query_set_latency(query,TRUE,minimum,maximum);
-    }
-    return TRUE;
-  }
-  return gst_pad_query_default(pad,parent,query);
-}
+static gboolean restore_preparation(DtsPass *s,gboolean apply);
+static gboolean preparation_allowed(DtsPass *s,guint epoch);
 
 static void end_native_session(DtsPass *s) {
+  restore_preparation(s,FALSE);
   g_mutex_lock(&s->file_lock);
   if (s->kernel_lease_fd >= 0) {
     ioctl(s->kernel_lease_fd, C5_LEASE_REVOKE, 0);
@@ -122,6 +107,7 @@ static void sync_epoch(DtsPass *s) {
 }
 
 static void clear_transport(DtsPass *s) {
+  restore_preparation(s,FALSE);
   while (!g_queue_is_empty(&s->held_buffers))
     gst_buffer_unref(g_queue_pop_head(&s->held_buffers));
   s->held_bytes = 0;
@@ -277,7 +263,6 @@ static gboolean configure(DtsPass *s, gboolean hd, gint rate, gint profile) {
     if(resumed){end_native_session(s);return FALSE;}
   }
   if(g_atomic_int_get(&s->stream_epoch)==G_MAXINT)return FALSE;
-  set_native_latency(s,hd && DTS_NATIVE_SESSION && !s->file_test && !s->silent_probe);
   if (hd && s->silent_probe && !s->file_test) probe_native_sink(s);
   s->hd = hd;
   s->profile = profile;
@@ -375,6 +360,141 @@ static gboolean payload_is_complete(DtsPass *s, const uint8_t *packet, gint size
   return TRUE;
 }
 
+
+/* All private ABI access is restricted to one exact sink in this pipeline,
+ * after matching the firmware library, instance size, negotiated caps and the
+ * current kernel lease. Neutral data bypasses GStreamer preroll, so the common
+ * A/V clock and every original DTS buffer/PTS remain untouched until READY. */
+static gboolean preparation_allowed(DtsPass *s,guint epoch) {
+  gboolean ok;
+  g_mutex_lock(&s->file_lock);
+  ok=!g_atomic_int_get(&s->flushing) && !g_atomic_int_get(&s->user_paused) &&
+     epoch==(guint)g_atomic_int_get(&s->stream_epoch) && s->kernel_lease_fd>=0 &&
+     ioctl(s->kernel_lease_fd,C5_LEASE_CHECK,epoch)==0;
+  g_mutex_unlock(&s->file_lock);
+  if(ok && s->preparation_sink) {
+    void *current=NULL;
+    memcpy(&current,(char *)s->preparation_sink+0x200,sizeof(current));
+    ok=current==s->preparation_handle && epoch==s->preparation_epoch;
+  }
+  return ok;
+}
+
+static gboolean restore_preparation(DtsPass *s,gboolean apply) {
+  gboolean ok=TRUE;void *ao=NULL,*lib=NULL;
+  if(!s->preparation_sink)return TRUE;
+  GST_STATE_LOCK(s->preparation_sink);
+  memcpy(&ao,(char *)s->preparation_sink+0x200,sizeof(ao));
+  if(ao==s->preparation_handle) {
+    lib=dlopen("/usr/lib/gstreamer-1.0/libgstlgaudiosink.so",RTLD_NOW|RTLD_NOLOAD);
+    int (*set)(void *,int)=lib?(int (*)(void *,int))dlsym(lib,"lgao_set_lipsync_mode"):NULL;
+    int (*play)(void *)=lib?(int (*)(void *))dlsym(lib,"lgao_play"):NULL;
+    /* set restores only the saved context field. On cancellation/teardown do
+     * not start playback; the platform owns stopping and destroying its sink. */
+    ok=set && play && !set(ao,s->preparation_lipsync);
+    if(ok && apply)ok=preparation_allowed(s,s->preparation_epoch) &&
+        !play(ao) && preparation_allowed(s,s->preparation_epoch);
+  } else ok=!apply; /* never dereference or overwrite a replaced handle */
+  GST_STATE_UNLOCK(s->preparation_sink);
+  if(lib)dlclose(lib);
+  gst_object_unref(s->preparation_sink);
+  s->preparation_sink=NULL;s->preparation_handle=NULL;
+  s->preparation_started=FALSE;s->preparation_epoch=s->preparation_feeds=0;
+  s->next_prepare=0;
+  return ok;
+}
+
+static gboolean prepare_owned_renderer(DtsPass *s) {
+  GstObject *root=gst_object_ref(s),*parent;
+  GstIterator *it;GstIteratorResult status;
+  GValue item=G_VALUE_INIT;GstElement *sink=NULL;
+  GTypeQuery query={0};gchar *contents=NULL,*digest=NULL;gsize length=0;
+  void *library=NULL,*ao=NULL;
+  int (*start)(void *)=NULL;
+  int (*play)(void *)=NULL;
+  int (*feed)(void *,void *,unsigned int,unsigned long long,int)=NULL;
+  int (*getmode)(void *,int *)=NULL;int (*setmode)(void *,int)=NULL;
+  unsigned char silence[32768]={0};
+  GstBuffer *first=g_queue_peek_head(&s->held_buffers);
+  guint64 pts=first?GST_BUFFER_PTS(first):GST_CLOCK_TIME_NONE;
+  guint count=0,epoch=(guint)g_atomic_int_get(&s->stream_epoch);
+  GstPad *sinkpad=NULL;gboolean caps_ready=FALSE,result=FALSE;gint64 until;
+  while((parent=gst_object_get_parent(root))){gst_object_unref(root);root=parent;}
+  if(!GST_IS_BIN(root))goto out;
+  it=gst_bin_iterate_recurse(GST_BIN(root));
+  while((status=gst_iterator_next(it,&item))==GST_ITERATOR_OK) {
+    GstElement *element=g_value_get_object(&item);
+    if(!strcmp(G_OBJECT_TYPE_NAME(element),"GstLgAudioRender")) {
+      count++;if(!sink)sink=gst_object_ref(element);
+    }
+    g_value_reset(&item);
+  }
+  if(G_VALUE_TYPE(&item))g_value_unset(&item);
+  gst_iterator_free(it);
+  if(status!=GST_ITERATOR_DONE)goto out; /* changing/ambiguous tree: no writes */
+  if(!count){result=TRUE;goto out;} /* no vendor sink in isolated appsink tests */
+  if(count!=1 || sizeof(void *)!=4)goto out;
+  g_type_query(G_OBJECT_TYPE(sink),&query);
+  if(query.instance_size!=0x318)goto out;
+  if(!g_file_get_contents("/usr/lib/gstreamer-1.0/libgstlgaudiosink.so",&contents,&length,NULL))goto out;
+  digest=g_compute_checksum_for_data(G_CHECKSUM_SHA256,(guchar *)contents,length);
+  if(strcmp(digest,"90dba3ef32704ce4096bf1e6045d2879d0c2192d507bc04d1e8e98437f420a43"))goto out;
+  library=dlopen("/usr/lib/gstreamer-1.0/libgstlgaudiosink.so",RTLD_NOW|RTLD_NOLOAD);
+  if(!library)goto out;
+  start=(int (*)(void *))dlsym(library,"lgao_start_renderer");
+  feed=(int (*)(void *,void *,unsigned int,unsigned long long,int))dlsym(library,"lgao_feed");
+  play=(int (*)(void *))dlsym(library,"lgao_play");
+  getmode=(int (*)(void *,int *))dlsym(library,"lgao_get_lipsync_mode");
+  setmode=(int (*)(void *,int))dlsym(library,"lgao_set_lipsync_mode");
+  if(!start || !feed || !play || !getmode || !setmode)goto out;
+  sinkpad=gst_element_get_static_pad(sink,"sink");
+  if(!sinkpad)goto out;
+  until=g_get_monotonic_time()+DTS_PREPARATION_TIMEOUT_US;
+  do {
+    GstCaps *caps=gst_pad_get_current_caps(sinkpad);
+    if(caps && gst_caps_get_size(caps)==1) {
+      const GstStructure *st=gst_caps_get_structure(caps,0);
+      const gchar *codec=gst_structure_get_string(st,"codec-str");
+      gint channels=0,rate=0;gboolean es=FALSE;
+      gst_structure_get_int(st,"channels",&channels);gst_structure_get_int(st,"rate",&rate);
+      gst_structure_get_boolean(st,"es",&es);
+      caps_ready=codec && !strcmp(codec,"dts_hd_ma") && channels==8 && rate==s->carrier_rate && es;
+    }
+    if(caps)gst_caps_unref(caps);
+    if(caps_ready || !preparation_allowed(s,epoch))break;
+    g_usleep(10000);
+  } while(g_get_monotonic_time()<until);
+  if(!caps_ready)goto out;
+  GST_STATE_LOCK(sink);
+  if(preparation_allowed(s,epoch)) {
+    memcpy(&ao,(char *)sink+0x200,sizeof(ao));
+    if(ao && (!s->preparation_sink ||
+       (s->preparation_sink==sink && s->preparation_handle==ao && s->preparation_epoch==epoch))) {
+      if(!s->preparation_sink) {
+        if(getmode(ao,&s->preparation_lipsync) || s->preparation_lipsync<0 || s->preparation_lipsync>2)goto unlock;
+        s->preparation_sink=gst_object_ref(sink);s->preparation_handle=ao;s->preparation_epoch=epoch;
+        if(!preparation_allowed(s,epoch) || setmode(ao,2))goto unlock;
+      }
+      if(!s->preparation_started) {
+        if(!preparation_allowed(s,epoch) || play(ao) ||
+           !preparation_allowed(s,epoch) || start(ao))goto unlock;
+        s->preparation_started=TRUE;
+      }
+      if(s->preparation_feeds>=16 || !preparation_allowed(s,epoch))goto unlock;
+      if(feed(ao,silence,sizeof(silence),pts,1)!=(int)sizeof(silence))goto unlock;
+      s->preparation_feeds++;
+      result=preparation_allowed(s,epoch);
+    }
+  }
+unlock:
+  GST_STATE_UNLOCK(sink);
+out:
+  if(sinkpad)gst_object_unref(sinkpad);
+  if(library)dlclose(library);
+  g_free(digest);g_free(contents);if(sink)gst_object_unref(sink);gst_object_unref(root);
+  return result;
+}
+
 static GstFlowReturn request_route(DtsPass *s) {
   gchar request[48];gint length;ssize_t sent=0;
   sync_epoch(s);
@@ -397,8 +517,10 @@ static GstFlowReturn native_receive_ready(DtsPass *s, gboolean wait) {
   do {
     unsigned char byte;
     ssize_t n;
-    if (g_atomic_int_get(&s->flushing)) return GST_FLOW_FLUSHING;
+    guint preparation_epoch=(guint)g_atomic_int_get(&s->stream_epoch);
+    if (g_atomic_int_get(&s->flushing)) {restore_preparation(s,FALSE);return GST_FLOW_FLUSHING;}
     if (g_atomic_int_get(&s->user_paused)) {
+      restore_preparation(s,FALSE);
       if(!wait)return GST_FLOW_OK;
       g_usleep(10000);continue;
     }
@@ -412,14 +534,30 @@ static GstFlowReturn native_receive_ready(DtsPass *s, gboolean wait) {
       guint expected_epoch=(guint)g_atomic_int_get(&s->stream_epoch);
       gint status = dts_ready_byte(&s->reply, byte, expected_epoch);
       if (status < 0) goto failed;
-      if (status == 1) { s->ready_epoch=expected_epoch;s->session_ready = TRUE; return GST_FLOW_OK; }
+      if (status == 1) { if(!restore_preparation(s,TRUE))goto preparation_failed; s->ready_epoch=expected_epoch;s->session_ready = TRUE; return GST_FLOW_OK; }
       if (!wait && ++processed >= 64) return GST_FLOW_OK;
       continue;
     }
     if (n == 0 || (errno != EAGAIN && errno != EINTR)) goto failed;
     if (g_get_monotonic_time() >= s->session_deadline) goto failed;
+    if(g_get_monotonic_time()>=s->next_prepare) {
+      if(!prepare_owned_renderer(s))goto preparation_failed;
+      s->next_prepare=g_get_monotonic_time()+100000;
+    }
     if (!wait) return GST_FLOW_OK;
     g_usleep(10000);
+    continue;
+preparation_failed:
+    restore_preparation(s,FALSE);
+    if(g_atomic_int_get(&s->flushing))return GST_FLOW_FLUSHING;
+    /* Preparation can race a user pause/seek after the loop's first guard.
+     * Keep originals for a fresh epoch instead of reporting a decoder error. */
+    if(g_atomic_int_get(&s->user_paused) ||
+       preparation_epoch!=(guint)g_atomic_int_get(&s->stream_epoch)) {
+      if(!wait)return GST_FLOW_OK;
+      continue;
+    }
+    goto failed;
   } while (TRUE);
 failed:
   end_native_session(s);
@@ -576,25 +714,15 @@ static GstFlowReturn push_frame(DtsPass *s, uint8_t *data, gint size) {
   if (GST_CLOCK_TIME_IS_VALID(pts)) s->next_pts = pts + duration;
   ++s->frames;
   if (hd && s->session_fd >= 0 && !s->session_ready) {
-    GstBuffer *silence;
     if (s->held_bytes + gst_buffer_get_size(buffer) > 32 * 1024 * 1024) {
       gst_buffer_unref(buffer); return GST_FLOW_ERROR;
     }
     g_queue_push_tail(&s->held_buffers, buffer);
     s->held_bytes += gst_buffer_get_size(buffer);
-    silence = gst_buffer_copy_deep(buffer);
-    if (!silence) return GST_FLOW_ERROR;
-    gst_buffer_memset(silence, 0, 0, gst_buffer_get_size(silence));
-    /* Warm the renderer without advancing media time. Original PTS/duration
-     * stay untouched and are scheduled using the advertised pipeline latency. */
-    GST_BUFFER_PTS(silence)=GST_CLOCK_TIME_NONE;
-    GST_BUFFER_DTS(silence)=GST_CLOCK_TIME_NONE;
-    GST_BUFFER_DURATION(silence)=0;
-    result = gst_pad_push(s->src, silence);
-    if (result != GST_FLOW_OK) return result;
-    result=request_route(s);
-    if(result!=GST_FLOW_OK)return result;
-    result = native_receive_ready(s, FALSE);
+    /* Prepare the owned renderer with neutral data outside GStreamer preroll.
+     * READY restores the original lipsync mode before releasing any originals.
+     * Never add latency or change the shared A/V clock or original PTS. */
+    result = native_receive_ready(s, TRUE);
     if (result != GST_FLOW_OK) return result;
     return s->session_ready ? native_drain(s) : GST_FLOW_OK;
   }
@@ -769,11 +897,6 @@ static GstStateChangeReturn change_state(GstElement *element, GstStateChange tra
     suspend_session(s,TRUE);
   }
   if(result!=GST_STATE_CHANGE_FAILURE && transition==GST_STATE_CHANGE_PAUSED_TO_READY) {
-    /* decodebin removes us while holding its state/stream locks. A synchronous
-     * LATENCY bus handler can reenter the pipeline before teardown completes.
-     * This element no longer contributes latency; clear it without notifying
-     * from teardown. A new configured stream advertises its latency normally. */
-    g_atomic_int_set(&s->native_latency,FALSE);
     reset_stream(s);end_native_session(s);
     gst_event_replace(&s->segment,NULL);
   }
@@ -807,7 +930,6 @@ static void dts_pass_init(DtsPass *s) {
   s->src = gst_pad_new_from_static_template(&src_template, "src");
   gst_pad_set_chain_function(s->sink, chain);
   gst_pad_set_event_function(s->sink, event);
-  gst_pad_set_query_function(s->src,src_query);
   gst_element_add_pad(GST_ELEMENT(s), s->sink);
   gst_element_add_pad(GST_ELEMENT(s), s->src);
   s->encoded = g_byte_array_new();

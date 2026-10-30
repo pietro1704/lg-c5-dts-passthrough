@@ -142,8 +142,35 @@ def current_bundle(prefix=PREFIX,hook=HOOK):
 
 def disable(prefix=PREFIX,hook=HOOK):
     bundle,state=current_bundle(prefix,hook)
+    if (prefix/'cold-registry').exists():cold_registry(bundle,prefix,restore=True)
     hook.unlink();(prefix/'current').unlink();(prefix/'installed.json').unlink()
     return {'boot':'disabled','current_audio':'unchanged; resident modules retained until reboot'}
+
+
+def cold_registry(bundle,prefix=PREFIX,restore=False):
+    """Access the underlying disk file without unbinding the live registry."""
+    require_target();secure_directory(prefix)
+    import sys
+    sys.path.insert(0,str(bundle/'native'))
+    spec=importlib.util.spec_from_file_location('cold_native_installer',bundle/'native/installer.py')
+    native=importlib.util.module_from_spec(spec);spec.loader.exec_module(native)
+    with (prefix/'cold-registry.lock').open('a') as lock:
+        os.fchmod(lock.fileno(),0o600);fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        with tempfile.TemporaryDirectory(prefix='.registry-view-',dir=prefix) as directory:
+            # A non-recursive directory bind excludes the per-file runtime bind.
+            native.command('mount','--bind','/mnt/flash/data',directory,timeout=5)
+            try:
+                registry=Path(directory)/'gst_1_0_registry.arm.bin'
+                runtime=Path('/run/c5-dts/registry.bin')
+                if runtime.is_file() and native.identity(registry)==native.identity(runtime):
+                    raise RuntimeError('registry view still contains runtime overlay')
+                if restore:
+                    native.restore_cold_registry(registry,prefix/'cold-registry')
+                    return {'cold_registry':'restored','current_audio':'unchanged'}
+                state=native.seed_cold_registry(bundle/'native',registry,prefix/'cold-registry')
+                return {'cold_registry':'prepared','seeded_sha256':state['seeded_sha256'],
+                    'current_audio':'unchanged','reboot_audio_verified':False}
+            finally:native.command('umount',directory,timeout=5)
 
 
 def start_controller(bundle,run,script):
@@ -211,7 +238,7 @@ def boot():
 
 def main():
     parser=argparse.ArgumentParser()
-    parser.add_argument('action',choices=['dry-run','install-boot','disable-boot','boot'])
+    parser.add_argument('action',choices=['dry-run','install-boot','prepare-cold-boot','disable-boot','boot'])
     parser.add_argument('--bundle',type=Path,default=Path(__file__).resolve().parent)
     args=parser.parse_args()
     if args.action=='dry-run':
@@ -219,7 +246,12 @@ def main():
     require_target()
     if args.action=='install-boot':
         if Path('/var/lib/webosbrew/init.d/zz-c5-dts-passthrough').exists():raise RuntimeError('older native boot hook still active; disable owned old installation first')
-        print(json.dumps(install(args.bundle)))
+        result=install(args.bundle)
+        bundle,_=current_bundle()
+        result.update(cold_registry(bundle))
+        print(json.dumps(result))
+    elif args.action=='prepare-cold-boot':
+        bundle,_=current_bundle();print(json.dumps(cold_registry(bundle)))
     elif args.action=='disable-boot':print(json.dumps(disable()))
     else:boot()
 

@@ -19,11 +19,23 @@ def main():
     parser.add_argument('--untimed-preparation',action='store_true')
     parser.add_argument('--fragment-size',type=int,default=0)
     parser.add_argument('--expect-timeout',action='store_true')
+    parser.add_argument('--isolated',action='store_true',help='use test-clock-isolation.c preload; never touch a resident driver')
+    parser.add_argument('--require-preroll',action='store_true',help='require route proof before the first buffer, without extra latency')
+    parser.add_argument('--cancel-after',type=float,default=0,help='cancel while preparation is pending')
+    parser.add_argument('--disconnect-before-ready',action='store_true')
+    parser.add_argument('--ready-epoch-offset',type=int,default=0)
     options=parser.parse_args()
     if os.geteuid()!=0 or platform.system()!='Linux' or platform.release()!='5.4.268-329.ptl4tv.5' or C.sizeof(C.c_void_p)!=4:
         raise SystemExit('requires exact target, ARM32 Python, root; no host execution')
-    if Path('/sys/module/c5_es_poc').exists():raise SystemExit('a driver is already loaded; do not unload a resident driver for this test')
-    endpoint=Path('/run/c5-dts/control.sock');endpoint.parent.mkdir(mode=0o700,exist_ok=True)
+    if options.isolated:
+        marker=getattr(C.CDLL(None),'c5_clock_isolated',None)
+        if marker is None or marker()!=1:raise SystemExit('isolated test preload missing; no device access attempted')
+        endpoint=Path(os.environ['C5_CLOCK_SOCKET'])
+        if not str(endpoint).startswith('/tmp/c5-clock-'):raise SystemExit('invalid isolated endpoint')
+    else:
+        if Path('/sys/module/c5_es_poc').exists():raise SystemExit('a driver is already loaded; do not unload a resident driver for this test')
+        endpoint=Path('/run/c5-dts/control.sock')
+    endpoint.parent.mkdir(mode=0o700,exist_ok=True)
     if endpoint.exists():raise SystemExit('another supervisor exists')
     module_data=options.module.read_bytes()
     if hashlib.sha256(module_data).hexdigest()!=options.module_sha256 or b'parmtype=lease_api_only:bool' not in module_data:
@@ -54,13 +66,16 @@ def main():
     mini_unref=api(gst,'gst_mini_object_unref',None,ptr)
     pipeline_latency=api(gst,'gst_pipeline_set_latency',None,ptr,u64)
     recalculate_latency=api(gst,'gst_bin_recalculate_latency',C.c_int,ptr)
+    query_new=api(gst,'gst_query_new_latency',ptr)
+    query_pad=api(gst,'gst_pad_query',C.c_int,ptr,ptr)
+    query_latency=api(gst,'gst_query_parse_latency',None,ptr,C.POINTER(C.c_int),C.POINTER(u64),C.POINTER(u64))
     get_pad=api(gst,'gst_element_get_static_pad',ptr,ptr,C.c_char_p)
     probe_buffer=api(gst,'gst_pad_probe_info_get_buffer',ptr,ptr)
     probe_callback=C.CFUNCTYPE(C.c_int,ptr,ptr,ptr)
     add_probe=api(gst,'gst_pad_add_probe',C.c_ulong,ptr,C.c_uint,probe_callback,ptr,ptr)
     sample_callback=C.CFUNCTYPE(C.c_int,ptr,ptr)
     connect_signal=api(obj,'g_signal_connect_data',C.c_ulong,ptr,C.c_char_p,sample_callback,ptr,ptr,C.c_uint)
-    arrivals=[];reference_arrivals=[]
+    arrivals=[];reference_arrivals=[];before_ready=[];ready_sent=threading.Event()
     @sample_callback
     def audio_sample(element,user):
         arrivals.append(time.monotonic());return 0
@@ -70,6 +85,7 @@ def main():
     @probe_callback
     def adjust_preparation(pad,info,user):
         buffer=probe_buffer(info)
+        if buffer and not ready_sent.is_set():before_ready.append(size(buffer))
         if buffer and options.untimed_preparation:
             length=size(buffer);payload=C.create_string_buffer(length)
             extract(buffer,0,payload,length)
@@ -95,7 +111,7 @@ def main():
                     pid,uid,_=struct.unpack('3i',peer.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
                     assert pid==os.getpid() and uid==0,'only this appsink process may use the mock'
                     peer.settimeout(5);assert receive_line(peer)==b'C5HD2\n'
-                    Path('/sys/module/c5_es_poc/parameters/grant_pid').write_text(str(pid)+'\n')
+                    if not options.isolated:Path('/sys/module/c5_es_poc/parameters/grant_pid').write_text(str(pid)+'\n')
                     peer.sendall(b'ARMED\n')
                     while not stopped.is_set():
                         line=receive_line(peer)
@@ -103,19 +119,22 @@ def main():
                         if line.startswith(b'CANCEL '):continue
                         assert line.startswith(b'PREROLL ')
                         epoch=int(line.split()[1]);assert epoch>0
+                        if options.disconnect_before_ready:return
                         if stopped.wait(options.ready_delay):return
-                        peer.sendall(f'READY {epoch}\n'.encode())
+                        if options.ready_epoch_offset==0:ready_sent.set()
+                        peer.sendall(f'READY {epoch+options.ready_epoch_offset}\n'.encode())
         except BaseException as error:errors.append(type(error).__name__+': '+str(error))
         finally:
             if endpoint.exists():endpoint.unlink()
     pipeline=source=sink=pipeline_bus=reference_source=reference_sink=None;thread=None;loaded=False;api_mode_confirmed=False
     try:
-        subprocess.run(['insmod',str(options.module),'selftest_only=0','lease_api_only=1'],check=True)
-        loaded=True
-        assert Path('/sys/module/c5_es_poc/parameters/lease_api_only').read_text().strip()=='Y'
-        api_mode_confirmed=True
+        if not options.isolated:
+            subprocess.run(['insmod',str(options.module),'selftest_only=0','lease_api_only=1'],check=True)
+            loaded=True
+            assert Path('/sys/module/c5_es_poc/parameters/lease_api_only').read_text().strip()=='Y'
+            api_mode_confirmed=True
         thread=threading.Thread(target=server,daemon=True);thread.start();assert server_ready.wait(2)
-        pipeline=parse(b'appsrc name=input format=time caps=audio/x-dts ! dtspassthrough ! appsink name=output emit-signals=true sync=true max-lateness=20000000 qos=true wait-on-eos=false appsrc name=reference format=time caps=application/x-clock-reference ! appsink name=reference-output emit-signals=true sync=true max-lateness=20000000 wait-on-eos=false',None)
+        pipeline=parse(b'appsrc name=input format=time caps=audio/x-dts ! dtspassthrough name=bridge ! appsink name=output emit-signals=true sync=true max-lateness=20000000 qos=true wait-on-eos=false appsrc name=reference format=time caps=application/x-clock-reference ! appsink name=reference-output emit-signals=true sync=true max-lateness=20000000 wait-on-eos=false',None)
         assert pipeline
         source=find(pipeline,b'input');sink=find(pipeline,b'output');pipeline_bus=bus(pipeline)
         reference_source=find(pipeline,b'reference');reference_sink=find(pipeline,b'reference-output')
@@ -157,7 +176,13 @@ def main():
         assert eos(source)==0
         deadline=time.monotonic()+6
         pipeline_error=False
-        while True:
+        cancel_elapsed=None
+        if options.cancel_after:
+            time.sleep(options.cancel_after)
+            stopped.set();cancel_start=time.monotonic()
+            assert state(pipeline,2)!=0,'cancellation failed'
+            cancel_elapsed=time.monotonic()-cancel_start
+        while not options.cancel_after:
             message=pop(pipeline_bus,1_000_000_000,3|(1<<19))
             assert message or time.monotonic()<deadline,'EOS/error deadline'
             if not message:continue
@@ -167,6 +192,13 @@ def main():
             if kind==2:pipeline_error=True;break
             assert recalculate_latency(pipeline),'latency negotiation failed'
         elapsed=time.monotonic()-started
+        bridge=find(pipeline,b'bridge');bridge_pad=get_pad(bridge,b'src')
+        query=query_new();live=C.c_int();minimum=u64();maximum=u64()
+        reported_latency=None
+        if query_pad(bridge_pad,query):
+            query_latency(query,C.byref(live),C.byref(minimum),C.byref(maximum))
+            reported_latency=minimum.value
+        mini_unref(query);unref(bridge_pad);unref(bridge)
         actual=bytearray();silence=0;samples=0;timestamps=[];durations=[];original_timestamps=[]
         while True:
             sample=pull(sink,0)
@@ -199,10 +231,19 @@ def main():
                 'original_pts_unchanged':original_timestamps==[n*512*1_000_000_000//48000 for n in range(len(frames))],
                 'reference_clock_delta_seconds':reference_delta,
                 'mock_errors':errors}
+        result['lease_backend']='userspace-isolated' if options.isolated else 'kernel-api-only'
+        result['buffers_before_ready']=len(before_ready)
+        result['reported_latency_ns']=reported_latency
+        result['cancel_elapsed_seconds']=cancel_elapsed
+        result['disconnect_before_ready']=options.disconnect_before_ready
+        result['ready_epoch_offset']=options.ready_epoch_offset
         print(json.dumps(result,indent=2))
-        if options.expect_timeout:
+        if options.cancel_after:
+            if actual or cancel_elapsed is None or cancel_elapsed>.5 or errors:raise SystemExit(1)
+        elif options.expect_timeout or options.disconnect_before_ready or options.ready_epoch_offset:
             if not pipeline_error or actual:raise SystemExit(1)
         elif pipeline_error or canonicalized!=canonical or errors or not result['timestamps_valid'] or not result['timestamps_monotonic'] or not result['original_pts_unchanged'] or reference_delta is None or reference_delta>.05:raise SystemExit(1)
+        if options.require_preroll and (before_ready or silence or reported_latency!=0):raise SystemExit('route preparation released a buffer before READY or added latency')
     finally:
         if pipeline:state(pipeline,1)
         for value in (source,sink,reference_source,reference_sink,pipeline_bus,pipeline):

@@ -4,7 +4,7 @@
  * ctypes.CDLL in a fresh target Python process, call c5_test_latency_teardown,
  * and require return code 0 under an outer subprocess timeout. Do not install
  * the test library as a playback plugin. The production build omits this file.
- * The original teardown returns 1; configuration must still notify normally.
+ * No configuration or teardown may advertise synthetic preparation latency.
  */
 static GstBusSyncReply teardown_probe_bus(GstBus *bus,GstMessage *message,gpointer data) {
   int *counts=data;(void)bus;
@@ -23,11 +23,8 @@ __attribute__((visibility("default"))) int c5_test_latency_teardown(void) {
   bus=gst_bus_new();gst_element_set_bus(element,bus);
   gst_bus_set_sync_handler(bus,teardown_probe_bus,counts,NULL);
   if(gst_element_set_state(element,GST_STATE_PAUSED)==GST_STATE_CHANGE_FAILURE)return -1;
-  set_native_latency((DtsPass *)element,TRUE);
-  if(counts[0]!=1)return -2;
   counts[1]=1;
   if(gst_element_set_state(element,GST_STATE_READY)==GST_STATE_CHANGE_FAILURE)return -3;
-  if(g_atomic_int_get(&((DtsPass *)element)->native_latency))return -4;
   counts[1]=0;
   gst_element_set_state(element,GST_STATE_NULL);
   gst_element_set_bus(element,NULL);gst_bus_set_sync_handler(bus,NULL,NULL,NULL);

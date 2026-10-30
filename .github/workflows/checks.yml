@@ -14,4 +14,5 @@ jobs:
       - run: node --check verify-iec.mjs
       - run: node --test tests/verify-iec.test.mjs
       - run: bash -n native/build-module.sh
+      - run: bash -n native/build-clock-isolation.sh
       - run: python3 native/checks.py

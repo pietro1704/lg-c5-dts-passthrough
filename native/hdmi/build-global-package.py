@@ -57,8 +57,10 @@ def build(native,output,project,objcopy,hd_donor,hdmi_donor=None):
 Target: rooted LG C5, firmware33.31.68, kernel5.4.268-329.ptl4tv.5, compatible
 existing dts_restore-2.0 and an eARC receiver advertising DTS support.
 
-Native component: original Nuvio1.2.9 DTS-HD MA path, with the exact previously
-accepted plugin/module/controller. HDMI components: DTS core5.1/48kHz and
+Native component: candidate original Nuvio1.2.9 DTS-HD MA path, with route
+confirmation before preroll, no synthetic latency and executable identity
+checks. This native candidate still requires hardware acceptance.
+HDMI components: DTS core5.1/48kHz and
 DTS-HD HBR8-channel/192kHz on the
 PS5 connected to UI HDMI3 / driver port1. It connects the original compressed
 path to eARC; it does not decode, downmix or transcode the DTS payload.
@@ -80,6 +82,9 @@ Install the next-boot hook on the supported TV as root:
     python3 global_install.py install-boot
 
 Installation stages immutable owned files and preserves current playback.
+It seeds the persistent GStreamer registry before the next cold boot so pooled
+media workers discover DTS before the Homebrew hook runs. A guarded backup is
+restored by disable-boot; current runtime registry bindings are preserved.
 The first full reboot must be validated before declaring persistence working.
 The hook starts the shared native bridge, native plugin integration and HDMI
 controllers, including the separately scoped HDMI-HD controller. Model

@@ -21,6 +21,8 @@ import subprocess
 import threading
 import time
 COMMAND_PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+PROC_ROOT=Path('/proc')
+MEDIA_WORKER=Path('/usr/sbin/starfish-media-pipeline')
 
 @dataclass(frozen=True)
 class Lease:
@@ -126,8 +128,26 @@ def command(*arguments, timeout=2):
 
 
 def process_start(pid):
-    text=Path(f'/proc/{pid}/stat').read_text()
+    text=(PROC_ROOT/str(pid)/'stat').read_text()
     return text[text.rindex(')')+2:].split()[19]
+
+
+def verify_worker(pid,start=None):
+    # comm is mutable (prctl); it cannot authenticate a native media worker.
+    # Compare the running executable inode with the firmware's canonical binary,
+    # and bracket the observation with start time to reject PID reuse.
+    observed=process_start(pid)
+    if start is not None and observed!=start:
+        raise RuntimeError('native process identity changed')
+    peer=PROC_ROOT/str(pid)
+    expected=MEDIA_WORKER.stat();actual=(peer/'exe').stat()
+    if (not stat.S_ISREG(actual.st_mode) or
+        (actual.st_dev,actual.st_ino)!=(expected.st_dev,expected.st_ino) or
+        (peer/'comm').read_text().strip()!='starfish-media-'):
+        raise RuntimeError('requesting executable is not the native media worker')
+    if process_start(pid)!=observed:
+        raise RuntimeError('native process identity changed during verification')
+    return observed
 
 
 def verify_plugin(pid,path,digest):
@@ -135,7 +155,7 @@ def verify_plugin(pid,path,digest):
         raise RuntimeError('plugin artifact changed')
     info=path.stat()
     identity=(os.major(info.st_dev),os.minor(info.st_dev),info.st_ino)
-    for line in Path(f'/proc/{pid}/maps').read_text().splitlines():
+    for line in (PROC_ROOT/str(pid)/'maps').read_text().splitlines():
         fields=line.split()
         major,minor=(int(part,16) for part in fields[3].split(':'))
         if (major,minor,int(fields[4]))==identity:
@@ -202,6 +222,10 @@ class RouteChanged(RuntimeError):
     """Normal cancellation/ownership change; never a global I/O failure."""
 
 
+class RendererChanged(RouteChanged):
+    """The same authenticated stream needs proof for a replacement renderer."""
+
+
 def receive(connection,expected):
     value=bytearray()
     while len(value)<len(expected):
@@ -255,7 +279,8 @@ class Supervisor:
         deadline=time.monotonic()+8
         cursor=cursor if cursor is not None else [1,b'PREROLL']
         if len(cursor)==1:cursor.append(b'PREROLL')
-        refreshed=0
+        refreshed=total_refreshed=0
+        binding=None
         while time.monotonic()<deadline:
             if self.stop.is_set() or self.stop_file.exists():
                 raise RuntimeError('trial stopped by health monitor')
@@ -264,20 +289,25 @@ class Supervisor:
                 advance_cursor(cursor,kind,epoch)
                 if kind==b'CANCEL':return None
                 deadline=time.monotonic()+8
-                refreshed=0
-            if process_start(pid)!=start:
-                raise RuntimeError('native process identity changed')
+                refreshed=total_refreshed=0
+                binding=None
+            verify_worker(pid,start)
             state=self.kernel.state()
             lease=state.owner(pid,generation)
+            observed_binding=(lease.captures,lease.invalidations,lease.index)
+            if observed_binding!=binding:
+                binding=observed_binding
+                refreshed=0
             candidate=(lease.epoch==cursor[0] and lease.proof_epoch==cursor[0] and lease.active and lease.index in (0,1) and state.source==1 and
                        state.port==lease.index and lease.es and lease.routes>0 and lease.hd>0)
             graph=self.kernel.vendor_read('/proc/aaudio/dot_block_connection') if candidate else ''
             dsp=self.kernel.vendor_read('/proc/aaudio/dsp1/dot_registry') if candidate else ''
             if route_confirmed(state,lease,graph,dsp,cursor[0]):
+                verify_worker(pid,start)
                 verify_plugin(pid,self.plugin,self.digest)
                 return cursor[0]
             if (lease.epoch==cursor[0] and lease.active and lease.es and lease.index in (0,1) and
-                state.source==1 and state.port==lease.index and refreshed<2 and
+                state.source==1 and state.port==lease.index and refreshed<2 and total_refreshed<4 and
                 time.monotonic()+1 < deadline):
                 with self.refresh_lock:
                     def guard():
@@ -285,16 +315,21 @@ class Supervisor:
                         if connection is not None and select.select([connection],[],[],0)[0]:
                             raise RouteChanged('pending cancellation or client close')
                         try:
-                            if process_start(pid)!=start:raise RouteChanged('process identity changed')
+                            verify_worker(pid,start)
+                            verify_plugin(pid,self.plugin,self.digest)
                             current=self.kernel.state();owned=current.owner(pid,generation)
                         except (OSError,RuntimeError) as error:raise RouteChanged('process/lease identity unavailable') from error
                         owners=[item for item in current.leases if item.active and item.index==current.port]
                         if not (len(owners)==1 and owners[0]==owned and owned.active and owned.opened and owned.epoch==cursor[0] and owned.es and owned.index in (0,1) and current.source==1 and current.port==owned.index):
                             raise RouteChanged('route ownership changed')
+                        if (owned.captures,owned.invalidations,owned.index)!=binding:
+                            raise RendererChanged('renderer replaced during refresh')
                     try:
                         guard();self.kernel.refresh(guard)
+                    except RendererChanged:continue
                     except RouteChanged:return None
                 refreshed+=1
+                total_refreshed+=1
             time.sleep(.1)
         raise TimeoutError('owned native ES/HD/eARC route was not confirmed')
 
@@ -303,9 +338,9 @@ class Supervisor:
         registered=False
         try:
             pid,uid,_gid=struct.unpack('3i',connection.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
-            if uid!=0 or Path(f'/proc/{pid}/comm').read_text().strip()!='starfish-media-':
+            if uid!=0:
                 raise RuntimeError('only an identified native media worker may request DTS-HD')
-            start=process_start(pid)
+            start=verify_worker(pid)
             verify_plugin(pid,self.plugin,self.digest)
             connection.settimeout(10)
             receive(connection,b'C5HD2\n')
@@ -315,9 +350,10 @@ class Supervisor:
                     raise RuntimeError('another control connection already represents this process')
                 self.pids.add(pid)
                 registered=True
+            verify_worker(pid,start)
+            verify_plugin(pid,self.plugin,self.digest)
             generation=self.kernel.grant(pid)
-            if process_start(pid)!=start:
-                raise RuntimeError('native process exited before arm')
+            verify_worker(pid,start)
             connection.sendall(b'ARMED\n')
             print(json.dumps({'event':'armed','pid':pid,'generation':generation}),flush=True)
             cursor=[0,b'CANCEL']
