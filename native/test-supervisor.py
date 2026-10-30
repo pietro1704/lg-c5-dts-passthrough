@@ -90,6 +90,107 @@ class Driver(unittest.TestCase):
         with patch.object(s,'COMMAND_PATH',str(tools),create=True),patch.dict(os.environ,{'PATH':'/missing','C5_EXEC_TEST':'loaded'}):
             self.assertEqual(s.command('insmod',timeout=5),'loaded')
 
+class WorkerIdentity(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
+        self.proc=self.root/'proc';self.peer=self.proc/'123';self.peer.mkdir(parents=True)
+        self.worker=self.root/'starfish-media-pipeline';self.worker.write_bytes(b'vendor worker')
+        self.python=self.root/'python3';self.python.write_bytes(b'python')
+        (self.peer/'comm').write_text('starfish-media-\n')
+        (self.peer/'exe').symlink_to(self.worker)
+        self.stat('start')
+        self.patches=[patch.object(s,'PROC_ROOT',self.proc,create=True),
+                      patch.object(s,'MEDIA_WORKER',self.worker,create=True)]
+        for p in self.patches:p.start()
+        self.kernel=Mock();self.kernel.io_failed.is_set.return_value=False
+        self.kernel.grant.return_value=9
+        self.service=s.Supervisor(self.kernel,self.root/'plugin','digest',self.root/'STOP')
+    def tearDown(self):
+        for p in reversed(self.patches):p.stop()
+        self.temp.cleanup()
+    def stat(self,start):
+        (self.peer/'stat').write_text('123 (starfish-media-) '+' '.join(['S']+['0']*18+[start]))
+    def executable(self,path):
+        (self.peer/'exe').unlink();(self.peer/'exe').symlink_to(path)
+    def serve(self,after_hello=None):
+        connection=Mock();connection.getsockopt.return_value=s.struct.pack('3i',123,0,0)
+        def received(*args):
+            if after_hello:after_hello()
+        self.service.limit.acquire()
+        with patch.object(s.socket,'SO_PEERCRED',17,create=True),patch.object(s,'verify_plugin'),patch.object(s,'receive',side_effect=received),patch.object(s,'receive_line',side_effect=EOFError),patch('builtins.print'):
+            self.service.serve(connection)
+        return connection
+    def test_renamed_python_cannot_receive_kernel_grant(self):
+        self.executable(self.python)
+        self.serve()
+        self.kernel.grant.assert_not_called()
+    def test_canonical_worker_receives_grant(self):
+        connection=self.serve()
+        self.kernel.grant.assert_called_once_with(123)
+        connection.sendall.assert_called_once_with(b'ARMED\n')
+    def test_exec_change_during_handshake_cannot_receive_grant(self):
+        self.serve(lambda:self.executable(self.python))
+        self.kernel.grant.assert_not_called()
+    def test_pid_reuse_during_handshake_cannot_receive_grant(self):
+        self.serve(lambda:self.stat('new-start'))
+        self.kernel.grant.assert_not_called()
+    def test_same_filename_with_different_inode_is_rejected(self):
+        other=self.root/'other';other.mkdir()
+        copy=other/self.worker.name;copy.write_bytes(self.worker.read_bytes())
+        self.executable(copy);self.serve()
+        self.kernel.grant.assert_not_called()
+    def test_exec_change_after_grant_cannot_be_armed(self):
+        def grant(pid):self.executable(self.python);return 9
+        self.kernel.grant.side_effect=grant
+        connection=self.serve();connection.sendall.assert_not_called()
+    def test_route_rejects_replaced_executable_before_vendor_reads(self):
+        self.executable(self.python)
+        with self.assertRaises(RuntimeError):self.service.route(123,'start',9)
+        self.kernel.vendor_read.assert_not_called();self.kernel.refresh.assert_not_called()
+
+    def test_exec_change_between_control_read_and_write_cancels_route(self):
+        kernel=s.Kernel(self.root/'module','unused','unused')
+        active=state();active=replace(active,leases=(replace(active.leases[0],routes=0,hd=0),*active.leases[1:]))
+        kernel.state=Mock(return_value=active);self.service.kernel=kernel
+        def read_control(*args):
+            self.executable(self.python)
+            return '  : values=2,1,2,0,0\n'
+        with patch.object(s,'command',side_effect=read_control) as command,patch.object(s,'verify_plugin'):
+            self.assertIsNone(self.service.route(123,'start',9))
+            command.assert_called_once_with('amixer','-c0','cget','numid=92')
+        self.assertFalse(kernel.io_failed.is_set())
+    def test_exec_change_during_vendor_read_cannot_return_ready(self):
+        self.kernel.state.return_value=state()
+        def read_vendor(path):
+            self.executable(self.python)
+            return graph(0) if path.endswith('dot_block_connection') else DSP
+        self.kernel.vendor_read.side_effect=read_vendor
+        with patch.object(s,'verify_plugin'):
+            with self.assertRaises(RuntimeError):self.service.route(123,'start',9)
+        self.kernel.refresh.assert_not_called()
+
+@unittest.skipUnless(sys.platform=='linux','real procfs executable identity requires Linux')
+class LinuxWorkerIdentity(unittest.TestCase):
+    def test_real_renamed_python_is_rejected_but_exact_executable_is_accepted(self):
+        script="""import ctypes,sys
+if ctypes.CDLL(None).prctl(15,b'starfish-media-',0,0,0):raise SystemExit(1)
+print('ready',flush=True)
+sys.stdin.read()
+"""
+        with subprocess.Popen([sys.executable,'-c',script],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True) as child:
+            try:
+                self.assertEqual(child.stdout.readline().strip(),'ready')
+                # A different real ELF inode stands in for the firmware worker.
+                with patch.object(s,'MEDIA_WORKER',Path('/bin/sh')):
+                    with self.assertRaises(RuntimeError):s.verify_worker(child.pid)
+                with patch.object(s,'MEDIA_WORKER',Path(sys.executable)):
+                    start=s.verify_worker(child.pid)
+                    self.assertEqual(s.verify_worker(child.pid,start),start)
+                    with self.assertRaises(RuntimeError):s.verify_worker(child.pid,'different-start')
+            finally:
+                child.stdin.close();child.wait(timeout=5)
+
+
 class Protocol(unittest.TestCase):
     def test_request_epochs(self):
         self.assertEqual(s.parse_request(b'PREROLL 42\n'),(b'PREROLL',42))
@@ -126,11 +227,11 @@ class RouteLoop(unittest.TestCase):
         active=replace(active,leases=(replace(active.leases[0],routes=0,hd=0),*active.leases[1:]))
         revoked=replace(active,leases=(replace(active.leases[0],active=0),*active.leases[1:]))
         self.kernel.state.side_effect=[active,revoked]
-        with patch.object(s,'process_start',return_value='start'):
+        with patch.object(s,'verify_worker',return_value='start'):
             self.assertIsNone(self.service.route(123,'start',9))
         self.kernel.refresh.assert_not_called()
     def test_renderer_one_releases_without_control_write(self):
-        with patch.object(s,'process_start',return_value='start'),patch.object(s,'verify_plugin') as verify,patch.object(s,'command',side_effect=[graph(1),DSP]):
+        with patch.object(s,'verify_worker',return_value='start'),patch.object(s,'verify_plugin') as verify,patch.object(s,'command',side_effect=[graph(1),DSP]):
             self.assertEqual(self.service.route(123,'start',9),1)
             self.kernel.refresh.assert_not_called();verify.assert_called_once()
     def test_cancellation_before_vendor_access(self):
@@ -145,7 +246,7 @@ class RouteLoop(unittest.TestCase):
         try:
             right.sendall(b'PREROLL 42\n');cursor=[41]
             st=state(1);self.kernel.state.return_value=replace(st,leases=(replace(st.leases[0],epoch=42,proof_epoch=42),*st.leases[1:]))
-            with patch.object(s,'process_start',return_value='start'),patch.object(s,'verify_plugin'),patch.object(s,'command',side_effect=[graph(1),DSP]):
+            with patch.object(s,'verify_worker',return_value='start'),patch.object(s,'verify_plugin'),patch.object(s,'command',side_effect=[graph(1),DSP]):
                 self.assertEqual(self.service.route(123,'start',9,left,cursor),42)
         finally:left.close();right.close()
     def test_peer_eof_aborts_before_vendor_access(self):
@@ -162,7 +263,7 @@ class RouteLoop(unittest.TestCase):
         connection=Mock();connection.getsockopt.return_value=s.struct.pack('3i',123,0,0)
         connection.recv.side_effect=[bytes([n]) for n in b'C5HD2\n']
         self.service.pids.add(123);self.service.clients.add(connection);self.service.limit.acquire()
-        with patch.object(s.socket,'SO_PEERCRED',17,create=True),patch.object(Path,'read_text',return_value='starfish-media-\n'),patch.object(s,'process_start',return_value='start'),patch.object(s,'verify_plugin'),patch('builtins.print'):
+        with patch.object(s.socket,'SO_PEERCRED',17,create=True),patch.object(Path,'read_text',return_value='starfish-media-\n'),patch.object(s,'verify_worker',return_value='start'),patch.object(s,'verify_plugin'),patch('builtins.print'):
             self.service.serve(connection)
         self.assertIn(123,self.service.pids);self.kernel.grant.assert_not_called()
 

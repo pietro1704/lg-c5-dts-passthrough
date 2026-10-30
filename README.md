@@ -19,7 +19,7 @@ opening TV settings suspends controller actions until the selected source return
 DSP codec6 and mode4/HBR recovered non-PCM eight-channel/192kHz transport on a
 Blu-ray trial; the user confirmed DTS-HD MA with sound. The global candidate
 now packages this controller for boot, checks the receiver's MA capabilities,
-and preserves the accepted native supervisor. The combined boot package,
+and uses the current guarded native supervisor. The combined boot package,
 Dolby preservation and complete source/receiver lifecycle matrix still need
 hardware acceptance. Game DTS startup delay remains under investigation.
 
@@ -58,7 +58,9 @@ The exact-build controller associates renderer0/1 with authenticated process lea
 
 Startup retains originals after sending caps and waits for route confirmation before the first output buffer completes preroll. It adds no artificial latency and never shifts original audio PTS. The previous two-second latency could underflow the vendor audio/video clock during track changes. Route confirmation has a1.5-second deadline; failure sends no original audio to an unconfirmed route. Pause suspends the lease; resume requires fresh proof. Confirmation before preroll still requires acceptance on the native hardware path.
 
-The supervisor rejects ambiguous owners, stale epochs, changed plugin inodes and unexpected formats. Vendor-command failure stops routing writes. Refresh revalidates ownership before writing; the vendor ALSA interface offers no atomic compare-and-set across unrelated applications.
+The supervisor verifies the requesting executable against the firmware's canonical media-worker inode, its process start time and the mapped plugin. A renamed diagnostic process cannot obtain a native lease. Identity is checked again after the handshake, before route refresh and before READY. The packager rejects stale supervisor copies and the retired frozen-supervisor option.
+
+The supervisor rejects ambiguous owners, stale epochs, changed plugin inodes and unexpected formats. Vendor-command failure stops routing writes. Refresh revalidates ownership before writing; the vendor ALSA interface offers no atomic compare-and-set across unrelated applications. Direct vendor-sink diagnostics bypass the platform resource manager and must not run alongside normal playback or HDMI; use the isolated memory-sink harness below.
 
 ## Build and test
 

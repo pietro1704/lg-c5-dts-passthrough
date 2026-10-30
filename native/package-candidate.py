@@ -21,7 +21,6 @@ SOURCES = {
     'installer.py': 'installer.py',
 }
 BLOCKERS = ['P2: target proof of preparation before preroll without added latency is missing']
-KNOWN_GOOD_SUPERVISOR='6077f3cf1b4cd815513677947efa850cee84b464f3baedbdc5a620066a04e0fe'
 
 
 def strip_debug(path, tool):
@@ -68,7 +67,10 @@ def validate_clock_evidence(path, bundle):
 
 
 def build(source, output, objcopy, clock_evidence=None, known_good_supervisor=False):
+    if known_good_supervisor:raise ValueError('legacy supervisor retired: executable identity and cancellation guards required')
     if output.exists() or output.is_symlink(): raise FileExistsError('output already exists')
+    if sha(regular_source(source,'supervisor.py'))!=sha(Path(__file__).with_name('supervisor.py')):
+        raise ValueError('source supervisor does not match current guarded implementation')
     if set(SOURCES) != FILES: raise ValueError('installer/package allowlists differ')
     audit = json.loads(regular_source(source, 'binary-audit.json').read_text())
     if audit.get('status') != 'PASS' or audit.get('module_sha256') != sha(regular_source(source, SOURCES['c5_es_poc.ko'])):
@@ -81,9 +83,6 @@ def build(source, output, objcopy, clock_evidence=None, known_good_supervisor=Fa
         inputs = {}
         for name, original in sorted(SOURCES.items()):
             path = regular_source(source, original)
-            if known_good_supervisor and name=='supervisor.py':
-                path=regular_source(Path(__file__).resolve().parent,'known-good-supervisor.py')
-                if sha(path)!=KNOWN_GOOD_SUPERVISOR:raise ValueError('accepted supervisor snapshot changed')
             inputs[name] = sha(path)
             destination = temporary / name
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -97,7 +96,7 @@ def build(source, output, objcopy, clock_evidence=None, known_good_supervisor=Fa
         manifest = {
             'schema': 1, 'kernel': KERNEL, 'module_build': match[1],
             'hardware_validated': False, 'boot_enabled': False,
-            'supervisor_variant':'known-good-20261027' if known_good_supervisor else 'current',
+            'supervisor_variant':'current',
             'blocking_review_findings': BLOCKERS if clock_evidence is None else [],
             'clock_evidence_sha256':None if clock_evidence is None else sha(clock_evidence),
             'unresolved_acceptance': ['DTS-HD MA and channel identity in original Nuvio',
@@ -122,7 +121,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--objcopy', default='/usr/local/opt/llvm/bin/llvm-objcopy')
     parser.add_argument('--clock-evidence',type=Path,help='exact candidate target evidence; allows temporary hardware trial only')
-    parser.add_argument('--known-good-supervisor',action='store_true',help='freeze the exact receiver-confirmed supervisor snapshot')
+    parser.add_argument('--known-good-supervisor',action='store_true',help=argparse.SUPPRESS)
     options = parser.parse_args()
     manifest = build(options.source, options.output, options.objcopy,options.clock_evidence,options.known_good_supervisor)
     print(json.dumps({'status': 'private candidate prepared', 'hardware_validated': False,

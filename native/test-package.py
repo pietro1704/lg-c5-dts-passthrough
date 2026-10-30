@@ -27,6 +27,7 @@ class Package(unittest.TestCase):
             else:
                 data = b'# own source\n'
             (self.source / source).write_bytes(data)
+        (self.source/'supervisor.py').write_bytes(Path(__file__).with_name('supervisor.py').read_bytes())
         self.audit()
         self.output = self.root / 'bundle'
 
@@ -105,12 +106,17 @@ class Package(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 installer.activate(self.output, self.root/'run', True)
         self.assertFalse((self.root/'run').exists())
-    def test_known_good_selection_keeps_exact_accepted_supervisor(self):
+    def test_legacy_supervisor_cannot_bypass_current_guards(self):
         with patch.object(package,'strip_debug',side_effect=lambda p,tool:None):
-            manifest=package.build(self.source,self.output,'unused',known_good_supervisor=True)
-        self.assertEqual(manifest['files']['supervisor.py'],package.KNOWN_GOOD_SUPERVISOR)
-        self.assertEqual(manifest['supervisor_variant'],'known-good-20261027')
-        installer.verify_bundle(self.output)
+            with self.assertRaisesRegex(ValueError,'retired'):
+                package.build(self.source,self.output,'unused',known_good_supervisor=True)
+        self.assertFalse(self.output.exists())
+
+    def test_stale_source_supervisor_is_rejected(self):
+        (self.source/'supervisor.py').write_bytes(b'# stale supervisor without identity checks\n')
+        with self.assertRaisesRegex(ValueError,'supervisor'):
+            self.build()
+        self.assertFalse(self.output.exists())
 
     def test_stale_binary_audit_rejected(self):
         (self.source/'module/c5_es_poc.ko').write_bytes(b'changed')
@@ -118,7 +124,7 @@ class Package(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
     def test_private_path_rejected_without_partial_bundle(self):
-        (self.source/'supervisor.py').write_bytes(b'# /Users' + b'/private/file\n')
+        (self.source/'configuration.py').write_bytes(b'# /Users' + b'/private/file\n')
         with self.assertRaises(ValueError): self.build()
         self.assertFalse(self.output.exists())
 
