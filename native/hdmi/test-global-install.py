@@ -1,5 +1,5 @@
 from pathlib import Path
-import hashlib,importlib.util,json,tempfile,unittest
+import hashlib,importlib.util,json,subprocess,sys,tempfile,unittest
 from unittest.mock import patch,Mock
 spec=importlib.util.spec_from_file_location('global_install',Path(__file__).with_name('global_install.py'))
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
@@ -69,9 +69,81 @@ class Tests(unittest.TestCase):
         with patch.object(b,'verified_modules',return_value=modules),patch.object(b.subprocess,'run'):
             manifest=b.build(self.bundle/'native',output,Path(__file__).resolve().parents[2],Path('objcopy'),donor,donor)
         self.assertEqual(set(manifest['files']),m.PAYLOAD)
-        self.assertEqual((output/'native/supervisor.py').read_bytes(),(self.bundle/'native/supervisor.py').read_bytes())
+        for name in json.loads((self.bundle/'native/manifest.json').read_text())['files']:
+            self.assertEqual((output/'native'/name).read_bytes(),(self.bundle/'native'/name).read_bytes())
+        # Exercise the real offline entrypoint; no target or root is required.
+        result=subprocess.run([sys.executable,str(output/'global_install.py'),'dry-run'],
+            capture_output=True,text=True,check=True)
+        self.assertEqual(json.loads(result.stdout)['boot'],'unchanged')
         self.assertEqual((output/'hdmi_hd/hdmi_hd_supervisor.py').read_bytes(),Path(__file__).with_name('hdmi_hd_supervisor.py').read_bytes())
         with self.assertRaises(RuntimeError):b.build(self.bundle/'native',output,self.root,Path('unused'),donor)
+
+    def test_native_manifest_traversal_cannot_overwrite_outside_staging(self):
+        incoming=self.root/'incoming';incoming.mkdir()
+        source=bundle(incoming/'bundle')
+        replacement=incoming/'outside';replacement.write_text('untrusted replacement')
+        outside=self.root/'outside';outside.write_text('keep original')
+        manifest=json.loads((source/'native/manifest.json').read_text())
+        manifest['files']['../../outside']=m.sha(replacement)
+        (source/'native/manifest.json').write_text(json.dumps(manifest))
+        donor=source/'hdmi_hd';modules={name:donor/name for name in ('broker-gate.ko','auto-route.ko')}
+        with patch.object(b,'verified_modules',return_value=modules),patch.object(b.subprocess,'run') as command:
+            with self.assertRaises(RuntimeError):
+                b.build(source/'native',self.root/'candidate',Path(__file__).resolve().parents[2],Path('unused'),donor,donor)
+            self.assertEqual(outside.read_text(),'keep original')
+            command.assert_not_called()
+        self.assertFalse((self.root/'candidate').exists())
+        self.assertEqual(list(self.root.glob('.global-package-*')),[])
+
+    def test_native_donor_identity_and_blockers_rejected_before_staging(self):
+        path=self.bundle/'native/manifest.json';original=path.read_text()
+        cases=[('schema',2),('kernel','wrong'),('module_build','0'*64),
+            ('blocking_review_findings',['unverified']),('files',{}),
+            ('files',dict(json.loads(original)['files'],unexpected='0'*64))]
+        for key,value in cases:
+            with self.subTest(key=key,value=value):
+                manifest=json.loads(original);manifest[key]=value;path.write_text(json.dumps(manifest))
+                with patch.object(b.tempfile,'mkdtemp',wraps=tempfile.mkdtemp) as stage,patch.object(b,'verified_modules') as modules:
+                    with self.assertRaises(RuntimeError):
+                        b.build(self.bundle/'native',self.root/'candidate',self.root,Path('unused'),self.bundle/'hdmi_hd')
+                    stage.assert_not_called();modules.assert_not_called()
+        path.write_text(original)
+
+    def test_changed_native_donor_rejected_without_staging(self):
+        (self.bundle/'native/supervisor.py').write_text('changed')
+        with patch.object(b.tempfile,'mkdtemp',wraps=tempfile.mkdtemp) as stage:
+            with self.assertRaisesRegex(RuntimeError,'native donor changed'):
+                b.build(self.bundle/'native',self.root/'candidate',self.root,Path('unused'),self.bundle/'hdmi_hd')
+            stage.assert_not_called()
+
+    def test_native_donor_symlink_components_rejected_before_staging(self):
+        native=self.bundle/'native'
+        for relative in ('manifest.json','plugins','supervisor.py'):
+            with self.subTest(relative=relative):
+                path=native/relative;saved=native/(relative+'.saved');path.rename(saved);path.symlink_to(saved.name)
+                try:
+                    with patch.object(b.tempfile,'mkdtemp',wraps=tempfile.mkdtemp) as stage,patch.object(b,'verified_modules') as modules:
+                        with self.assertRaises(RuntimeError):
+                            b.build(native,self.root/'candidate',self.root,Path('unused'),self.bundle/'hdmi_hd')
+                        stage.assert_not_called();modules.assert_not_called()
+                finally:path.unlink();saved.rename(path)
+        linked=self.root/'linked-native';linked.symlink_to(native)
+        with patch.object(b.tempfile,'mkdtemp',wraps=tempfile.mkdtemp) as stage:
+            with self.assertRaises(RuntimeError):
+                b.build(linked,self.root/'candidate',self.root,Path('unused'),self.bundle/'hdmi_hd')
+            stage.assert_not_called()
+
+    def test_builder_failure_and_cancellation_clean_only_staging(self):
+        donor=self.bundle/'hdmi_hd';modules={name:donor/name for name in ('broker-gate.ko','auto-route.ko')}
+        keep=self.root/'keep';keep.write_text('user data')
+        for error in (OSError('copy failed'),KeyboardInterrupt()):
+            with self.subTest(error=type(error).__name__):
+                with patch.object(b,'verified_modules',return_value=modules),patch.object(b.shutil,'copy2',side_effect=error):
+                    with self.assertRaises(type(error)):
+                        b.build(self.bundle/'native',self.root/'candidate',self.root,Path('unused'),donor,donor)
+                self.assertEqual(keep.read_text(),'user data')
+                self.assertFalse((self.root/'candidate').exists())
+                self.assertEqual(list(self.root.glob('.global-package-*')),[])
 
     def test_module_donor_requires_matching_hashes_and_approved_build(self):
         donor=self.bundle/'hdmi_hd'
