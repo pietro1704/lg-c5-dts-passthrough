@@ -1,7 +1,8 @@
-import tempfile,unittest,json,hashlib,os,shutil
+import tempfile,unittest,json,hashlib,os,shutil,subprocess
 from pathlib import Path
 from unittest.mock import patch
 import installer as i
+import errno
 
 def elf(kind,machine):
     value=bytearray(64);value[:4]=b'\x7fELF';value[4]=kind;value[5]=1;value[18:20]=machine.to_bytes(2,'little');return value
@@ -17,6 +18,83 @@ def bundle(root):
 class Installer(unittest.TestCase):
     def setUp(self):self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name);self.bundle=bundle(self.root/'bundle')
     def tearDown(self):self.temp.cleanup()
+    def test_bind_source_busy_rename_uses_guarded_inode_write(self):
+        registry=self.root/'mounted.bin';registry.write_bytes(b'original')
+        inode=i.identity(registry)
+        with patch.object(i.os,'replace',side_effect=OSError(errno.EBUSY,'mountpoint')):
+            i.replace_registry(registry,b'seeded registry',i.sha(registry))
+        self.assertEqual(i.identity(registry),inode)
+        self.assertEqual(registry.read_bytes(),b'seeded registry')
+    def test_mounted_write_failure_and_cancellation_restore_original(self):
+        for error in (OSError('fsync failed'),KeyboardInterrupt()):
+            registry=self.root/'mounted.bin';registry.write_bytes(b'original')
+            with patch.object(i.os,'fsync',side_effect=[error,None]):
+                with self.assertRaises(type(error)):
+                    i.rewrite_mounted_registry(registry,b'new longer registry',i.sha(registry),registry.stat())
+            self.assertEqual(registry.read_bytes(),b'original')
+    def test_cold_registry_seed_is_persistent_and_reversible(self):
+        registry=self.root/'cold.bin';registry.write_bytes(b'vendor registry')
+        state=self.root/'seed'
+        def inspect(*args,**kwargs):
+            Path(kwargs['env']['GST_REGISTRY_1_0']).write_bytes(b'seeded registry')
+            return 'Filename '+str(self.bundle/'plugins/libgstdtspassthrough.so')+'\nRank primary + 54 (310)'
+        with patch.object(i,'command',side_effect=inspect):
+            i.seed_cold_registry(self.bundle,registry,state)
+            self.assertEqual(registry.read_bytes(),b'seeded registry')
+            i.seed_cold_registry(self.bundle,registry,state) # no duplicate backup
+        i.restore_cold_registry(registry,state)
+        self.assertEqual(registry.read_bytes(),b'vendor registry')
+    def test_failed_seed_inspection_preserves_original(self):
+        registry=self.root/'cold.bin';registry.write_bytes(b'original')
+        with patch.object(i,'command',return_value='wrong plugin'):
+            with self.assertRaises(RuntimeError):i.seed_cold_registry(self.bundle,registry,self.root/'seed')
+        self.assertEqual(registry.read_bytes(),b'original')
+    def test_seed_refuses_foreign_registry_or_plugin_on_repeat_and_restore(self):
+        registry=self.root/'cold.bin';registry.write_bytes(b'original');state=self.root/'seed'
+        def inspect(*args,**kwargs):
+            Path(kwargs['env']['GST_REGISTRY_1_0']).write_bytes(b'seeded')
+            return str(self.bundle/'plugins/libgstdtspassthrough.so')+'\nRank (310)'
+        with patch.object(i,'command',side_effect=inspect):i.seed_cold_registry(self.bundle,registry,state)
+        registry.write_bytes(b'foreign')
+        with self.assertRaises(RuntimeError):i.seed_cold_registry(self.bundle,registry,state)
+        with self.assertRaises(RuntimeError):i.restore_cold_registry(registry,state)
+        self.assertEqual(registry.read_bytes(),b'foreign')
+    def test_cancelled_probe_preserves_disk_and_cleans_unjournaled_files(self):
+        registry=self.root/'cold.bin';registry.write_bytes(b'original');state=self.root/'seed'
+        with patch.object(i,'command',side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):i.seed_cold_registry(self.bundle,registry,state)
+        self.assertEqual(registry.read_bytes(),b'original')
+        self.assertEqual(list(state.iterdir()),[])
+    def test_interrupted_replace_retries_from_journal_and_rejects_changed_plugin(self):
+        registry=self.root/'cold.bin';registry.write_bytes(b'original');state=self.root/'seed'
+        def inspect(*args,**kwargs):
+            Path(kwargs['env']['GST_REGISTRY_1_0']).write_bytes(b'seeded')
+            return str(self.bundle/'plugins/libgstdtspassthrough.so')+'\nRank (310)'
+        with patch.object(i,'command',side_effect=inspect),patch.object(i,'replace_registry',side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):i.seed_cold_registry(self.bundle,registry,state)
+        self.assertEqual(registry.read_bytes(),b'original')
+        with patch.object(i,'command',side_effect=AssertionError('must use journal')):
+            i.seed_cold_registry(self.bundle,registry,state)
+        self.assertEqual(registry.read_bytes(),b'seeded')
+        (self.bundle/'plugins/libgstdtspassthrough.so').write_bytes(b'changed')
+        with self.assertRaises((RuntimeError,ValueError)):i.seed_cold_registry(self.bundle,registry,state)
+        i.restore_cold_registry(registry,state)
+        self.assertEqual(registry.read_bytes(),b'original')
+    def test_boot_command_finds_sbin_tool_with_restricted_inherited_path(self):
+        tools=self.root/'sbin';tools.mkdir();tool=tools/'insmod'
+        tool.write_text('#!/bin/sh\nprintf "%s" "$C5_EXEC_TEST"\n');tool.chmod(0o700)
+        with patch.object(i,'COMMAND_PATH',str(tools),create=True),patch.dict(os.environ,{'PATH':'/missing','C5_EXEC_TEST':'inherited'}):
+            self.assertEqual(i.command('insmod'),'inherited')
+            self.assertEqual(i.command('insmod',env={'PATH':'/missing','C5_EXEC_TEST':'isolated','GST_REGISTRY_1_0':'/isolated'}),'isolated')
+    def test_actual_spawned_supervisor_inherits_system_path(self):
+        script=self.bundle/'supervisor.py'
+        script.write_text('import os\nprint(os.environ["PATH"])\n')
+        manifest=json.loads((self.bundle/'manifest.json').read_text())
+        with patch.dict(os.environ,{'PATH':'/missing'}):
+            process=i.spawn_supervisor(self.bundle,manifest,self.root/'run',subprocess.PIPE)
+            output,_=process.communicate(timeout=5)
+        self.assertEqual(process.returncode,0)
+        self.assertEqual(output.decode().strip(),i.COMMAND_PATH)
     def test_offline_dryrun_has_no_mutation_or_device_commands(self):
         before=sorted(p.relative_to(self.root).as_posix() for p in self.root.rglob('*'))
         with patch.object(i,'command',side_effect=AssertionError('device command')):

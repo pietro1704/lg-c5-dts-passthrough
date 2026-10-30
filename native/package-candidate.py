@@ -20,7 +20,7 @@ SOURCES = {
     'configuration.py': 'configuration.py',
     'installer.py': 'installer.py',
 }
-BLOCKERS = ['P2: retained originals duplicate preparation timestamps; synchronized target test and vendor A/V validation pending']
+BLOCKERS = ['P2: target proof of preparation before preroll without added latency is missing']
 
 
 def strip_debug(path, tool):
@@ -45,7 +45,9 @@ def validate_clock_evidence(path, bundle):
         if (run.get('plugin_sha256')!=sha(bundle/'plugins/libgstdtspassthrough.so') or
             run.get('module_sha256')!=sha(bundle/'c5_es_poc.ko') or
             run.get('audio_device_opened') is not False or run.get('kernel_audio_hooks') is not False or
-            run.get('model_latency_seconds')!=0 or run.get('untimed_preparation') is not False or run.get('mock_errors')):
+            run.get('model_latency_seconds')!=0 or run.get('untimed_preparation') is not False or run.get('mock_errors') or
+            run.get('reported_latency_ns')!=0 or run.get('buffers_before_ready')!=0 or
+            run.get('lease_backend') not in ('kernel-api-only','userspace-isolated')):
             raise ValueError('clock evidence does not identify this isolated automatic candidate')
         if run.get('expected_timeout') is True:
             if run.get('pipeline_error') is not True or run.get('captured_original_bytes')!=0 or run.get('ready_delay_seconds',0)<1.5:
@@ -64,8 +66,11 @@ def validate_clock_evidence(path, bundle):
         raise ValueError('clock evidence lacks delay/fragmentation/timeout cases')
 
 
-def build(source, output, objcopy, clock_evidence=None):
+def build(source, output, objcopy, clock_evidence=None, known_good_supervisor=False):
+    if known_good_supervisor:raise ValueError('legacy supervisor retired: executable identity and cancellation guards required')
     if output.exists() or output.is_symlink(): raise FileExistsError('output already exists')
+    if sha(regular_source(source,'supervisor.py'))!=sha(Path(__file__).with_name('supervisor.py')):
+        raise ValueError('source supervisor does not match current guarded implementation')
     if set(SOURCES) != FILES: raise ValueError('installer/package allowlists differ')
     audit = json.loads(regular_source(source, 'binary-audit.json').read_text())
     if audit.get('status') != 'PASS' or audit.get('module_sha256') != sha(regular_source(source, SOURCES['c5_es_poc.ko'])):
@@ -91,12 +96,13 @@ def build(source, output, objcopy, clock_evidence=None):
         manifest = {
             'schema': 1, 'kernel': KERNEL, 'module_build': match[1],
             'hardware_validated': False, 'boot_enabled': False,
+            'supervisor_variant':'current',
             'blocking_review_findings': BLOCKERS if clock_evidence is None else [],
             'clock_evidence_sha256':None if clock_evidence is None else sha(clock_evidence),
             'unresolved_acceptance': ['DTS-HD MA and channel identity in original Nuvio',
                 'vendor sink and actual video/audio synchronization',
                 'DTS core and Dolby preservation', 'pause/seek/track/cancel/reboot stability',
-                'cause of prior V2 TV freeze remains undetermined'],
+                'native route confirmation before first sink buffer'],
             'input_sha256': inputs,
             'files': {name: sha(temporary/name) for name in sorted(FILES)},
         }
@@ -115,8 +121,9 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--objcopy', default='/usr/local/opt/llvm/bin/llvm-objcopy')
     parser.add_argument('--clock-evidence',type=Path,help='exact candidate target evidence; allows temporary hardware trial only')
+    parser.add_argument('--known-good-supervisor',action='store_true',help=argparse.SUPPRESS)
     options = parser.parse_args()
-    manifest = build(options.source, options.output, options.objcopy,options.clock_evidence)
+    manifest = build(options.source, options.output, options.objcopy,options.clock_evidence,options.known_good_supervisor)
     print(json.dumps({'status': 'private candidate prepared', 'hardware_validated': False,
                       'activation_blocked': bool(manifest['blocking_review_findings']), 'files': manifest['files']}, indent=2))
 

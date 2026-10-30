@@ -27,6 +27,7 @@ class Package(unittest.TestCase):
             else:
                 data = b'# own source\n'
             (self.source / source).write_bytes(data)
+        (self.source/'supervisor.py').write_bytes(Path(__file__).with_name('supervisor.py').read_bytes())
         self.audit()
         self.output = self.root / 'bundle'
 
@@ -45,6 +46,7 @@ class Package(unittest.TestCase):
         success={'plugin_sha256':installer.sha(self.source/'libgstdtspassthrough.so'),
                  'module_sha256':installer.sha(self.source/'module/c5_es_poc.ko'),
                  'audio_device_opened':False,'kernel_audio_hooks':False,
+                 'reported_latency_ns':0,'buffers_before_ready':0,'lease_backend':'userspace-isolated',
                  'model_latency_seconds':0,'untimed_preparation':False,'mock_errors':[],
                  'expected_timeout':False,'pipeline_error':False,'ready_delay_seconds':1.4,
                  'fragment_size':337,'byte_identity_preserved':True,'original_pts_unchanged':True,
@@ -75,6 +77,18 @@ class Package(unittest.TestCase):
         evidence=self.evidence(lambda d:d['runs'][0].update(model_latency_seconds=2))
         with self.assertRaises(ValueError):self.build(evidence)
 
+    def test_plugin_added_latency_is_rejected_even_when_payload_is_preserved(self):
+        evidence=self.evidence(lambda d:d['runs'][0].update(reported_latency_ns=2_000_000_000))
+        with self.assertRaises(ValueError):self.build(evidence)
+
+    def test_synthetic_preroll_before_ready_is_rejected(self):
+        evidence=self.evidence(lambda d:d['runs'][0].update(buffers_before_ready=1))
+        with self.assertRaises(ValueError):self.build(evidence)
+
+    def test_unknown_isolation_backend_is_rejected(self):
+        evidence=self.evidence(lambda d:d['runs'][0].update(lease_backend='unknown'))
+        with self.assertRaises(ValueError):self.build(evidence)
+
     def test_missing_fragmentation_case_rejected(self):
         evidence=self.evidence(lambda d:d['runs'][0].update(fragment_size=0))
         with self.assertRaises(ValueError):self.build(evidence)
@@ -92,6 +106,17 @@ class Package(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 installer.activate(self.output, self.root/'run', True)
         self.assertFalse((self.root/'run').exists())
+    def test_legacy_supervisor_cannot_bypass_current_guards(self):
+        with patch.object(package,'strip_debug',side_effect=lambda p,tool:None):
+            with self.assertRaisesRegex(ValueError,'retired'):
+                package.build(self.source,self.output,'unused',known_good_supervisor=True)
+        self.assertFalse(self.output.exists())
+
+    def test_stale_source_supervisor_is_rejected(self):
+        (self.source/'supervisor.py').write_bytes(b'# stale supervisor without identity checks\n')
+        with self.assertRaisesRegex(ValueError,'supervisor'):
+            self.build()
+        self.assertFalse(self.output.exists())
 
     def test_stale_binary_audit_rejected(self):
         (self.source/'module/c5_es_poc.ko').write_bytes(b'changed')
@@ -99,7 +124,7 @@ class Package(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
     def test_private_path_rejected_without_partial_bundle(self):
-        (self.source/'supervisor.py').write_bytes(b'# /Users' + b'/private/file\n')
+        (self.source/'configuration.py').write_bytes(b'# /Users' + b'/private/file\n')
         with self.assertRaises(ValueError): self.build()
         self.assertFalse(self.output.exists())
 

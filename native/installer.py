@@ -4,6 +4,7 @@
 Never unload the resident driver or restore controls over another session.
 """
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -20,6 +21,7 @@ from configuration import native_configuration
 FILES={'plugins/libgstdtspassthrough.so','c5_es_poc.ko','supervisor.py','configuration.py','installer.py'}
 KERNEL='5.4.268-329.ptl4tv.5'
 BOOT_HOOK=Path('/var/lib/webosbrew/init.d/zz-c5-dts-passthrough')
+COMMAND_PATH='/usr/sbin:/usr/bin:/sbin:/bin'
 
 
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -32,6 +34,132 @@ def registry_environment(bundle,registry):
 
 def identity(path):
     info=Path(path).stat();return [info.st_dev,info.st_ino]
+
+
+def rewrite_mounted_registry(path,data,expected,info):
+    """A bind-source dentry cannot be renamed on webOS; retain its inode.
+
+    The caller has already fsynced the backup/journal. This bounded write does
+    not affect the separately bound live registry. Power loss can leave an
+    incomplete disk cache; GStreamer can regenerate it, and the backup remains.
+    """
+    original=path.read_bytes()
+    fd=os.open(path,os.O_RDWR|os.O_NOFOLLOW)
+    with os.fdopen(fd,'r+b',buffering=0) as output:
+        current=os.fstat(output.fileno())
+        if (current.st_dev,current.st_ino)!=(info.st_dev,info.st_ino) or sha(path)!=expected:
+            raise RuntimeError('mounted registry identity changed')
+        try:
+            offset=0
+            while offset<len(data):
+                written=output.write(data[offset:])
+                if not written:raise OSError('short registry write')
+                offset+=written
+            output.truncate(len(data));os.fsync(output.fileno())
+            if sha(path)!=hashlib.sha256(data).hexdigest():raise RuntimeError('cold registry readback mismatch')
+        except BaseException:
+            if identity(path)!=[info.st_dev,info.st_ino]:raise RuntimeError('foreign registry during write rollback')
+            output.seek(0);offset=0
+            while offset<len(original):
+                written=output.write(original[offset:])
+                if not written:raise OSError('short registry rollback')
+                offset+=written
+            output.truncate(len(original));os.fsync(output.fileno())
+            raise
+
+
+def replace_registry(path,data,expected):
+    """Replace a regular, owned registry only while its identity still matches."""
+    info=path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or sha(path)!=expected:
+        raise RuntimeError('foreign cold registry; no overwrite')
+    fd,name=tempfile.mkstemp(prefix='.c5-registry-',dir=path.parent)
+    try:
+        with os.fdopen(fd,'wb') as output:
+            os.fchmod(output.fileno(),stat.S_IMODE(info.st_mode))
+            os.fchown(output.fileno(),info.st_uid,info.st_gid)
+            output.write(data);output.flush();os.fsync(output.fileno())
+        current=path.lstat()
+        if ((current.st_dev,current.st_ino,current.st_mtime_ns,current.st_ctime_ns)!=
+                (info.st_dev,info.st_ino,info.st_mtime_ns,info.st_ctime_ns) or sha(path)!=expected):
+            raise RuntimeError('cold registry changed during preparation')
+        try:os.replace(name,path)
+        except OSError as error:
+            if error.errno!=errno.EBUSY:raise
+            rewrite_mounted_registry(path,data,expected,info)
+        directory=os.open(path.parent,os.O_RDONLY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
+    finally:
+        if os.path.exists(name):os.unlink(name)
+
+
+def seed_cold_registry(bundle,registry,state_dir):
+    """Seed the disk registry before next boot's preloaded media workers start.
+
+    Caller supplies an unoverlaid view; current runtime bindings are untouched.
+    A prepared journal allows retry after interruption on either side of replace.
+    """
+    verify_bundle(bundle)
+    if state_dir.is_symlink():raise RuntimeError('symlink cold registry state')
+    state_dir.mkdir(mode=0o700,exist_ok=True)
+    info=state_dir.stat()
+    if info.st_uid!=os.geteuid() or info.st_mode&0o077:raise RuntimeError('unsafe cold registry state')
+    state_path=state_dir/'state.json';backup=state_dir/'original.bin';candidate=state_dir/'seeded.bin'
+    if any(p.is_symlink() for p in (registry,state_path,backup,candidate)):
+        raise RuntimeError('symlink cold registry component')
+    plugin=bundle/'plugins/libgstdtspassthrough.so'
+    if state_path.exists():
+        state=json.loads(state_path.read_text())
+        if state['plugin']!=str(plugin) or state['plugin_sha256']!=sha(plugin):
+            raise RuntimeError('different cold registry installation')
+        if sha(backup)!=state['original_sha256'] or sha(candidate)!=state['seeded_sha256']:
+            raise RuntimeError('cold registry backup or candidate changed')
+        if sha(registry)==state['seeded_sha256']:return state
+        replace_registry(registry,candidate.read_bytes(),state['original_sha256'])
+        return state
+    if backup.exists() or candidate.exists():raise RuntimeError('unjournaled cold registry files; inspect before retry')
+    original=registry.lstat()
+    if not stat.S_ISREG(original.st_mode) or original.st_uid!=os.geteuid():
+        raise RuntimeError('foreign cold registry')
+    before=sha(registry)
+    try:
+        shutil.copy2(registry,backup);shutil.copy2(registry,candidate)
+        inspected=command('gst-inspect-1.0','dtspassthrough',timeout=5,env=registry_environment(bundle,candidate))
+        if str(plugin) not in inspected or not re.search(r'Rank\s+.*\(310\)',inspected):
+            raise RuntimeError('cold registry plugin identity or rank unavailable')
+        current=registry.lstat()
+        if ((current.st_dev,current.st_ino,current.st_mtime_ns,current.st_ctime_ns)!=
+                (original.st_dev,original.st_ino,original.st_mtime_ns,original.st_ctime_ns) or sha(registry)!=before):
+            raise RuntimeError('cold registry changed during inspection')
+        state={'plugin':str(plugin),'plugin_sha256':sha(plugin),
+            'original_sha256':before,'seeded_sha256':sha(candidate)}
+        for path in (backup,candidate):
+            with path.open('rb') as stream:os.fsync(stream.fileno())
+        save(state,state_path)
+        directory=os.open(state_dir,os.O_RDONLY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
+        replace_registry(registry,candidate.read_bytes(),before)
+        return state
+    except BaseException:
+        # Once journaled, retain all evidence for deterministic retry/rollback.
+        if not state_path.exists():
+            for path in (backup,candidate):
+                if path.exists():path.unlink()
+        raise
+
+
+def restore_cold_registry(registry,state_dir):
+    state_path=state_dir/'state.json';backup=state_dir/'original.bin'
+    if any(p.is_symlink() for p in (state_dir,state_path,backup,registry)):
+        raise RuntimeError('symlink cold registry rollback component')
+    state=json.loads(state_path.read_text())
+    if sha(backup)!=state['original_sha256']:raise RuntimeError('cold registry backup changed')
+    if sha(registry)!=state['original_sha256']:
+        replace_registry(registry,backup.read_bytes(),state['seeded_sha256'])
+    for name in ('state.json','original.bin','seeded.bin'):(state_dir/name).unlink()
+    state_dir.rmdir()
 
 
 def verify_bundle(bundle):
@@ -112,7 +240,10 @@ class UncertainCommand(RuntimeError):
 
 
 def command(*args,timeout=5,env=None):
-    process=subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=env)
+    # Homebrew boot inherits a reduced PATH; module and mount tools live in
+    # sbin. Keep registry overrides while using only trusted system tool dirs.
+    environment=dict(os.environ if env is None else env,PATH=COMMAND_PATH)
+    process=subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,env=environment)
     try:stdout,stderr=process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         process.terminate()
@@ -161,6 +292,15 @@ def verify_endpoint(endpoint,pid):
         if peer!=pid or uid!=0:raise RuntimeError('control endpoint belongs to another process')
 
 
+def spawn_supervisor(bundle,manifest,run,output):
+    return subprocess.Popen(['/usr/bin/python3',str(bundle/'supervisor.py'),
+        '--module',str(bundle/'c5_es_poc.ko'),'--module-sha256',manifest['files']['c5_es_poc.ko'],
+        '--module-build',manifest['module_build'],'--plugin',str(bundle/'plugins/libgstdtspassthrough.so'),
+        '--plugin-sha256',manifest['files']['plugins/libgstdtspassthrough.so'],'--control',str(run)],
+        stdout=output,stderr=subprocess.STDOUT,start_new_session=True,
+        env=dict(os.environ,PATH=COMMAND_PATH))
+
+
 def _activate_unlocked(bundle,run,allow_trial=False):
     require_target();manifest=verify_bundle(bundle)
     if not allow_trial:
@@ -194,11 +334,7 @@ def _activate_unlocked(bundle,run,allow_trial=False):
         try:
             with (run/'supervisor.log').open('a') as output:
                 os.chmod(run/'supervisor.log',0o600)
-                process=subprocess.Popen(['/usr/bin/python3',str(bundle/'supervisor.py'),
-                    '--module',str(bundle/'c5_es_poc.ko'),'--module-sha256',manifest['files']['c5_es_poc.ko'],
-                    '--module-build',manifest['module_build'],'--plugin',str(bundle/'plugins/libgstdtspassthrough.so'),
-                    '--plugin-sha256',manifest['files']['plugins/libgstdtspassthrough.so'],'--control',str(run)],
-                    stdout=output,stderr=subprocess.STDOUT,start_new_session=True)
+                process=spawn_supervisor(bundle,manifest,run,output)
             state['supervisor_pid']=process.pid;save(state,state_file)
             deadline=time.monotonic()+3
             while not (run/'control.sock').is_socket():
