@@ -117,3 +117,14 @@
 !/native/test-clock-isolation.c
 
 !/native/test-preparation.py
+
+# Reviewed public wiki sources.
+!/docs/
+/docs/*
+!/docs/wiki/
+/docs/wiki/*
+!/docs/wiki/Home.md
+!/docs/wiki/Installation.md
+!/docs/wiki/Architecture.md
+!/docs/wiki/Testing.md
+!/docs/wiki/Troubleshooting.md

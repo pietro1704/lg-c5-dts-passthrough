@@ -3,7 +3,12 @@ import ast
 import re
 import subprocess
 
-ALLOWED = {'.github/workflows/checks.yml',
+ALLOWED = {'docs/wiki/Home.md',
+ 'docs/wiki/Installation.md',
+ 'docs/wiki/Architecture.md',
+ 'docs/wiki/Testing.md',
+ 'docs/wiki/Troubleshooting.md',
+ '.github/workflows/checks.yml',
  '.gitignore',
  'LICENSES/GPL-2.0-only.txt',
  'LICENSES/LGPL-2.1-or-later.txt',
