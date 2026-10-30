@@ -19,9 +19,19 @@ opening TV settings suspends controller actions until the selected source return
 DSP codec6 and mode4/HBR recovered non-PCM eight-channel/192kHz transport on a
 Blu-ray trial; the user confirmed DTS-HD MA with sound. The global candidate
 now packages this controller for boot, checks the receiver's MA capabilities,
-and uses the current guarded native supervisor. The combined boot package,
-Dolby preservation and complete source/receiver lifecycle matrix still need
-hardware acceptance. Game DTS startup delay remains under investigation.
+and uses the current guarded native supervisor. On 30 October 2026, the same
+booted package passed Nuvio acceptance, PS5 game DTS and Blu-ray DD → DTS-HD MA;
+the user confirmed normal sound. The game capture retained DTS at48kHz and a
+locked4K signal for30 seconds. The Blu-ray capture retained video lock across
+the format change and reached DTS-HD MA with an eight-channel/192kHz carrier.
+The complete source/receiver lifecycle matrix and game startup delay remain
+unmeasured; these checks do not establish every channel or title combination.
+
+PS5 games use the console's audio-format priority setting. Blu-ray playback has
+its own audio-format setting: select Bitstream in that player and the desired
+disc language/track. A brief PCM receiver label can appear during the transition;
+in the captured DD → MA switch, MA output appeared about one second after the
+first observed DTS-HD input sample. Sustained PCM is not successful MA acceptance.
 
 The published v0.2.0 archive is the native-only release described below.
 
