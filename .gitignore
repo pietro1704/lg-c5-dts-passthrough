@@ -128,3 +128,11 @@
 !/docs/wiki/Architecture.md
 !/docs/wiki/Testing.md
 !/docs/wiki/Troubleshooting.md
+
+# Reviewed TV release entrypoints and host tests.
+!/install.sh
+!/remove.sh
+!/tv-package.py
+!/INSTALL.md
+!/scripts/build-tv-release.py
+!/tests/test-tv-package.py

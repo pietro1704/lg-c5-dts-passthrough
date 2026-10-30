@@ -16,3 +16,5 @@ jobs:
       - run: bash -n native/build-module.sh
       - run: bash -n native/build-clock-isolation.sh
       - run: python3 native/checks.py
+      - run: sh -n install.sh remove.sh
+      - run: python3 tests/test-tv-package.py
